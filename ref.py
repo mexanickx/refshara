@@ -23,18 +23,6 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from flask import Flask
 
-# Создаем экземпляр Flask
-app = Flask(__name__)
-
-# Определяем маршрут
-@app.route('/')
-def hello_world():
-    return 'Hello, World!'
-
-# Запуск сервера в режиме отладки (не используйте для продакшн)
-if __name__ == '__main__':
-    app.run(debug=True)
-    
 # === НАСТРОЙКИ БОТА ===
 API_TOKEN = '7740361367:AAF9ayvF8uKDDrVH2OnrRAJ5DIVdhFLVPZI'
 ADMIN_IDS = [1041720539, 6216901034]
