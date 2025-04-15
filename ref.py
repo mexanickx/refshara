@@ -24,7 +24,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from flask import Flask
 
 # === НАСТРОЙКИ БОТА ===
-API_TOKEN = '7740361367:AAF9ayvF8uKDDrVH2OnrRAJ5DIVdhFLVPZI'
+API_TOKEN = '7740361367:AAE9p-74SBUa1C2W74vypBuzSlmUW-BHv_0'
 ADMIN_IDS = [1041720539, 6216901034]
 CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQ0V3YNV4O0GHcWTvSbzkEar43'
 CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
