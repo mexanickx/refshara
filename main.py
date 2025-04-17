@@ -1,27 +1,25 @@
 import asyncio
- import inspect
- import random
- import pandas as pd
- import io
- import logging
- 
- logging.basicConfig(
+import inspect
+import random
+import pandas as pd
+import io
+import logging
+logging.basicConfig(
      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
      level=logging.INFO
  )
- import requests
- from datetime import datetime, timedelta
- from collections import defaultdict
- 
- from aiogram import Bot, Dispatcher, types, F
- from aiogram.types import (
+import requests
+from datetime import datetime, timedelta
+from collections import defaultdict
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import (
      ReplyKeyboardMarkup,
      KeyboardButton,
      InlineKeyboardMarkup,
      InlineKeyboardButton,
      BufferedInputFile
  )
- from aiogram.filters import CommandStart, CommandObject
+from aiogram.filters import CommandStart, CommandObject
  from aiogram.fsm.context import FSMContext
  from aiogram.fsm.state import StatesGroup, State
  from aiogram.fsm.storage.memory import MemoryStorage
