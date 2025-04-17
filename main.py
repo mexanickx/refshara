@@ -20,19 +20,19 @@ from aiogram.types import (
      BufferedInputFile
  )
 from aiogram.filters import CommandStart, CommandObject
- from aiogram.fsm.context import FSMContext
- from aiogram.fsm.state import StatesGroup, State
- from aiogram.fsm.storage.memory import MemoryStorage
- from aiogram.exceptions import TelegramForbiddenError
- from aiogram.utils.keyboard import InlineKeyboardBuilder
- import os
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import os
  TOKEN = os.environ.get("7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw")
- import threading
- import os
- from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
  
  # запускаем фейковый сервер, чтобы Render не ругался
- def run_fake_server():
+def run_fake_server():
      class Handler(BaseHTTPRequestHandler):
          def do_GET(self):
              self.send_response(200)
@@ -44,78 +44,78 @@ from aiogram.filters import CommandStart, CommandObject
      print(f"Fake web server running on port {port}")
      server.serve_forever()
  
- threading.Thread(target=run_fake_server).start()
+threading.Thread(target=run_fake_server).start()
  
  
  # === НАСТРОЙКИ БОТА ===
- API_TOKEN = '7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw'
- ADMIN_IDS = [1041720539, 6216901034]
- CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQ0V3YNV4O0GHcWTvSbzkEar43'
- CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
+API_TOKEN = '7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw'
+ADMIN_IDS = [1041720539, 6216901034]
+CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQ0V3YNV4O0GHcWTvSbzkEar43'
+CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
  
  # Константы майнинга
- MINING_COOLDOWN = 3600  # 1 час в секундах
- MINING_REWARD_RANGE = (3, 3)  # Диапазон награды
- TASK_REWARD_RANGE = (5, 10)  # Награда за задание
- REFERRAL_REWARD = 3  # Награда за приглашенного реферала
- MIN_WITHDRAWAL = 0.05  # Минимальная сумма вывода в USDT
- ZB_EXCHANGE_RATE = 0.01  # Курс 1 Zebranium = 0.01 USDT
+MINING_COOLDOWN = 3600  # 1 час в секундах
+MINING_REWARD_RANGE = (3, 3)  # Диапазон награды
+TASK_REWARD_RANGE = (5, 10)  # Награда за задание
+REFERRAL_REWARD = 3  # Награда за приглашенного реферала
+MIN_WITHDRAWAL = 0.05  # Минимальная сумма вывода в USDT
+ZB_EXCHANGE_RATE = 0.01  # Курс 1 Zebranium = 0.01 USDT
  
  # Инициализация бота и диспетчера
- bot = Bot(token=API_TOKEN)
- dp = Dispatcher(storage=MemoryStorage())
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
  
  # Хранилища данных
- blocked_users = set()
- users = {}
- tasks = {}
- task_proofs = defaultdict(dict)
- task_completion_dates = defaultdict(dict)
- pending_approvals = {}
- maintenance_mode = False
+blocked_users = set()
+users = {}
+tasks = {}
+task_proofs = defaultdict(dict)
+task_completion_dates = defaultdict(dict)
+pending_approvals = {}
+maintenance_mode = False
  
  # Классы состояний
- class TaskStates(StatesGroup):
+class TaskStates(StatesGroup):
      waiting_for_proof = State()
  
- class BroadcastState(StatesGroup):
+class BroadcastState(StatesGroup):
      waiting_for_message = State()
  
- class BlockState(StatesGroup):
+class BlockState(StatesGroup):
      waiting_for_id = State()
  
- class UnblockState(StatesGroup):
+class UnblockState(StatesGroup):
      waiting_for_id = State()
  
- class AddTaskState(StatesGroup):
+class AddTaskState(StatesGroup):
      waiting_for_task_number = State()
      waiting_for_task_text = State()
      waiting_for_task_photo = State()
  
- class DeleteTaskState(StatesGroup):
+class DeleteTaskState(StatesGroup):
      waiting_for_task_number = State()
  
- class TopStates(StatesGroup):
+class TopStates(StatesGroup):
      waiting_top_type = State()
      waiting_referral_period = State()
      waiting_task_period = State()
  
- class EditUserState(StatesGroup):
+class EditUserState(StatesGroup):
      waiting_for_id = State()
      waiting_for_field = State()
      waiting_for_value = State()
  
- class WithdrawState(StatesGroup):
+class WithdrawState(StatesGroup):
      waiting_for_amount = State()
  
- class DepositState(StatesGroup):
+class DepositState(StatesGroup):
      waiting_for_amount = State()
  
  # =====================
  # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
  # =====================
  
- def check_not_blocked(func):
+def check_not_blocked(func):
      async def wrapper(message: types.Message, **kwargs):
          kwargs.pop('dispatcher', None)
  
@@ -130,7 +130,7 @@ from aiogram.filters import CommandStart, CommandObject
          return await func(message, **kwargs)
      return wrapper
  
- def get_main_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
+def get_main_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
      kb = [
          [KeyboardButton(text="👀Профиль")],
          [KeyboardButton(text="👥Рефералы"), KeyboardButton(text="💼Задания")],
@@ -140,8 +140,7 @@ from aiogram.filters import CommandStart, CommandObject
      if is_admin:
          kb.append([KeyboardButton(text="👑Админка")])
      return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
- 
- def get_admin_kb() -> ReplyKeyboardMarkup:
+def get_admin_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🧾 Список пользователей")],
@@ -155,14 +154,14 @@ from aiogram.filters import CommandStart, CommandObject
          resize_keyboard=True
      )
  
- def get_tasks_kb() -> ReplyKeyboardMarkup:
+def get_tasks_kb() -> ReplyKeyboardMarkup:
      kb = []
      for task_num in sorted(tasks.keys()):
          kb.append([KeyboardButton(text=f"Задание {task_num}")])
      kb.append([KeyboardButton(text="🔙 Назад")])
      return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
  
- def get_task_kb(task_num: int) -> ReplyKeyboardMarkup:
+def get_task_kb(task_num: int) -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text=f"✅ Выполнил задание {task_num}")],
@@ -171,7 +170,7 @@ from aiogram.filters import CommandStart, CommandObject
          resize_keyboard=True
      )
  
- def get_tops_type_kb() -> ReplyKeyboardMarkup:
+def get_tops_type_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text="🏆 Топы приглашений"), KeyboardButton(text="🏆 Топы заданий")],
@@ -180,7 +179,7 @@ from aiogram.filters import CommandStart, CommandObject
          resize_keyboard=True
      )
  
- def get_period_kb() -> ReplyKeyboardMarkup:
+def get_period_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text="📅 Топ недели"), KeyboardButton(text="📅 Топ месяца")],
@@ -189,7 +188,7 @@ from aiogram.filters import CommandStart, CommandObject
          resize_keyboard=True
      )
  
- def get_tasks_admin_kb() -> ReplyKeyboardMarkup:
+def get_tasks_admin_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text="➕ Добавить задание"), KeyboardButton(text="❌ Удалить задание")],
@@ -198,7 +197,7 @@ from aiogram.filters import CommandStart, CommandObject
          resize_keyboard=True
      )
  
- def get_edit_user_kb() -> ReplyKeyboardMarkup:
+def get_edit_user_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👥 Рефералы")],
@@ -211,7 +210,7 @@ from aiogram.filters import CommandStart, CommandObject
  # ФУНКЦИИ ВЫВОДА И ПОПОЛНЕНИЯ
  # =====================
  
- async def create_crypto_bot_check(user_id: int, amount_usdt: float) -> dict:
+async def create_crypto_bot_check(user_id: int, amount_usdt: float) -> dict:
      headers = {
          'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
          'Content-Type': 'application/json'
@@ -239,7 +238,7 @@ from aiogram.filters import CommandStart, CommandObject
          print(f"Error creating check: {e}")
          return {'ok': False, 'error': {'name': str(e)}}
  
- async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
+async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
      headers = {
          'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
          'Content-Type': 'application/json'
@@ -267,7 +266,7 @@ from aiogram.filters import CommandStart, CommandObject
          print(f"Error creating invoice: {e}")
          return {'ok': False, 'error': {'name': str(e)}}
  
- async def check_invoice_status(invoice_id: int) -> dict:
+async def check_invoice_status(invoice_id: int) -> dict:
      headers = {
          'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
          'Content-Type': 'application/json'
@@ -285,7 +284,7 @@ from aiogram.filters import CommandStart, CommandObject
          print(f"Error checking invoice status: {e}")
          return {'ok': False, 'error': {'name': str(e)}}
  
- async def process_withdrawal(user_id: int, amount_zb: int):
+async def process_withdrawal(user_id: int, amount_zb: int):
      if user_id not in users:
          return False, "Пользователь не найден"
  
@@ -315,7 +314,7 @@ from aiogram.filters import CommandStart, CommandObject
      users[user_id]['balance'] -= amount_zb
      return True, check['result']['bot_check_url']
  
- async def process_deposit(user_id: int, amount_usdt: float):
+async def process_deposit(user_id: int, amount_usdt: float):
      if user_id not in users:
          return False, "Пользователь не найден"
  
@@ -343,9 +342,9 @@ from aiogram.filters import CommandStart, CommandObject
  # ОСНОВНЫЕ КОМАНДЫ БОТА
  # =====================
  
- @dp.message(CommandStart())
- @check_not_blocked
- async def cmd_start(message: types.Message, command: CommandObject = None, **kwargs):
+@dp.message(CommandStart())
+@check_not_blocked
+async def cmd_start(message: types.Message, command: CommandObject = None, **kwargs):
      if maintenance_mode and message.from_user.id not in ADMIN_IDS:
          return
  
@@ -382,9 +381,9 @@ from aiogram.filters import CommandStart, CommandObject
          reply_markup=get_main_kb(is_admin)
      )
  
- @dp.message(F.text == "👀Профиль")
- @check_not_blocked
- async def profile_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "👀Профиль")
+@check_not_blocked
+async def profile_handler(message: types.Message, **kwargs):
      user = users.get(message.from_user.id, {})
      balance = user.get('balance', 0)
  
@@ -412,8 +411,8 @@ from aiogram.filters import CommandStart, CommandObject
          reply_markup=builder.as_markup()
      )
  
- @dp.callback_query(F.data == "deposit_funds")
- async def deposit_funds_handler(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "deposit_funds")
+async def deposit_funds_handler(callback: types.CallbackQuery, state: FSMContext):
      await callback.message.answer(
          "💰 Пополнение баланса\n\n"
          "Введите сумму в USDT, которую хотите внести (например: 5):",
@@ -425,16 +424,16 @@ from aiogram.filters import CommandStart, CommandObject
      await state.set_state(DepositState.waiting_for_amount)
      await callback.answer()
  
- @dp.message(DepositState.waiting_for_amount, F.text == "🔙 Отмена")
- async def cancel_deposit(message: types.Message, state: FSMContext):
+@dp.message(DepositState.waiting_for_amount, F.text == "🔙 Отмена")
+async def cancel_deposit(message: types.Message, state: FSMContext):
      await message.answer(
          "❌ Пополнение баланса отменено.",
          reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
      )
      await state.clear()
  
- @dp.message(DepositState.waiting_for_amount)
- async def process_deposit_amount(message: types.Message, state: FSMContext):
+@dp.message(DepositState.waiting_for_amount)
+async def process_deposit_amount(message: types.Message, state: FSMContext):
      try:
          amount_usdt = float(message.text)
          if amount_usdt <= 0:
@@ -468,7 +467,7 @@ from aiogram.filters import CommandStart, CommandObject
  
      await state.clear()
  
- async def check_payment_status(user_id: int, invoice_id: int, amount_usdt: float):
+async def check_payment_status(user_id: int, invoice_id: int, amount_usdt: float):
      max_attempts = 30  # Максимальное количество проверок
      attempt = 0
  
@@ -520,8 +519,8 @@ from aiogram.filters import CommandStart, CommandObject
      except Exception:
          pass
  
- @dp.callback_query(F.data == "withdraw_funds")
- async def withdraw_funds_handler(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "withdraw_funds")
+async def withdraw_funds_handler(callback: types.CallbackQuery, state: FSMContext):
      user_id = callback.from_user.id
      user_data = users.get(user_id, {})
      balance = user_data.get('balance', 0)
@@ -541,16 +540,16 @@ from aiogram.filters import CommandStart, CommandObject
      await state.set_state(WithdrawState.waiting_for_amount)
      await callback.answer()
  
- @dp.message(WithdrawState.waiting_for_amount, F.text == "🔙 Отмена")
- async def cancel_withdrawal(message: types.Message, state: FSMContext):
+@dp.message(WithdrawState.waiting_for_amount, F.text == "🔙 Отмена")
+async def cancel_withdrawal(message: types.Message, state: FSMContext):
      await message.answer(
          "❌ Вывод средств отменен.",
          reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
      )
      await state.clear()
  
- @dp.message(WithdrawState.waiting_for_amount)
- async def process_withdrawal_amount(message: types.Message, state: FSMContext):
+@dp.message(WithdrawState.waiting_for_amount)
+async def process_withdrawal_amount(message: types.Message, state: FSMContext):
      try:
          amount_zb = int(message.text)
          if amount_zb <= 0:
@@ -576,9 +575,9 @@ from aiogram.filters import CommandStart, CommandObject
  
      await state.clear()
  
- @dp.message(F.text == "👥Рефералы")
- @check_not_blocked
- async def referrals_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "👥Рефералы")
+@check_not_blocked
+async def referrals_handler(message: types.Message, **kwargs):
      user_id = message.from_user.id
      bot_username = (await bot.get_me()).username
      link = f"https://t.me/{bot_username}?start={user_id}"
@@ -589,9 +588,9 @@ from aiogram.filters import CommandStart, CommandObject
          f"💎 Вы получаете {REFERRAL_REWARD} Zebranium за каждого приглашенного друга!"
      )
  
- @dp.message(F.text == "⛏️Майнинг")
- @check_not_blocked
- async def mining_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "⛏️Майнинг")
+@check_not_blocked
+async def mining_handler(message: types.Message, **kwargs):
      user_id = message.from_user.id
      if user_id not in users:
          await message.answer("❌ Сначала зарегистрируйтесь через /start")
@@ -623,9 +622,9 @@ from aiogram.filters import CommandStart, CommandObject
          f"⏳ Следующий майнинг через 1 час"
      )
  
- @dp.message(F.text == "💼Задания")
- @check_not_blocked
- async def tasks_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "💼Задания")
+@check_not_blocked
+async def tasks_handler(message: types.Message, **kwargs):
      if not tasks:
          await message.answer("📭 На данный момент нет доступных заданий.")
          return
@@ -637,42 +636,42 @@ from aiogram.filters import CommandStart, CommandObject
          reply_markup=get_tasks_kb()
      )
  
- @dp.message(F.text == "📈Топы")
- @check_not_blocked
- async def tops_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "📈Топы")
+@check_not_blocked
+async def tops_handler(message: types.Message, **kwargs):
      await message.answer("🏆 Выберите тип топа:", reply_markup=get_tops_type_kb())
  
- @dp.message(F.text == "🏆 Топы приглашений")
- @check_not_blocked
- async def referral_top_type(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "🏆 Топы приглашений")
+@check_not_blocked
+async def referral_top_type(message: types.Message, state: FSMContext, **kwargs):
      await message.answer("📅 Выберите период:", reply_markup=get_period_kb())
      await state.set_state(TopStates.waiting_referral_period)
  
- @dp.message(F.text == "🏆 Топы заданий")
- @check_not_blocked
- async def tasks_top_type(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "🏆 Топы заданий")
+@check_not_blocked
+async def tasks_top_type(message: types.Message, state: FSMContext, **kwargs):
      await message.answer("📅 Выберите период:", reply_markup=get_period_kb())
      await state.set_state(TopStates.waiting_task_period)
  
- @dp.message(TopStates.waiting_referral_period, F.text.in_(["📅 Топ недели", "📅 Топ месяца"]))
- @check_not_blocked
- async def referral_top_period(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(TopStates.waiting_referral_period, F.text.in_(["📅 Топ недели", "📅 Топ месяца"]))
+@check_not_blocked
+async def referral_top_period(message: types.Message, state: FSMContext, **kwargs):
      period = "week" if "недели" in message.text else "month"
      top_text = await get_referral_top(period)
      await message.answer(top_text, reply_markup=get_tops_type_kb())
      await state.clear()
  
- @dp.message(TopStates.waiting_task_period, F.text.in_(["📅 Топ недели", "📅 Топ месяца"]))
- @check_not_blocked
- async def tasks_top_period(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(TopStates.waiting_task_period, F.text.in_(["📅 Топ недели", "📅 Топ месяца"]))
+@check_not_blocked
+async def tasks_top_period(message: types.Message, state: FSMContext, **kwargs):
      period = "week" if "недели" in message.text else "month"
      top_text = await get_tasks_top(period)
      await message.answer(top_text, reply_markup=get_tops_type_kb())
      await state.clear()
  
- @dp.message(F.text.regexp(r'^Задание \d+$'))
- @check_not_blocked
- async def show_task(message: types.Message, **kwargs):
+@dp.message(F.text.regexp(r'^Задание \d+$'))
+@check_not_blocked
+async def show_task(message: types.Message, **kwargs):
      try:
          task_num = int(message.text.split()[1])
          task = tasks.get(task_num)
@@ -698,9 +697,9 @@ from aiogram.filters import CommandStart, CommandObject
      except Exception:
          await message.answer("❌ Ошибка при загрузке задания.")
  
- @dp.message(F.text.regexp(r'^✅ Выполнил задание \d+$'))
- @check_not_blocked
- async def task_complete_handler(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text.regexp(r'^✅ Выполнил задание \d+$'))
+@check_not_blocked
+async def task_complete_handler(message: types.Message, state: FSMContext, **kwargs):
      try:
          task_num = int(message.text.split()[-1])
  
@@ -721,8 +720,8 @@ from aiogram.filters import CommandStart, CommandObject
      except Exception:
          await message.answer("❌ Произошла ошибка. Пожалуйста, попробуйте еще раз.")
  
- @dp.message(TaskStates.waiting_for_proof, F.photo)
- async def process_task_proof(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(TaskStates.waiting_for_proof, F.photo)
+async def process_task_proof(message: types.Message, state: FSMContext, **kwargs):
      data = await state.get_data()
      task_num = data['task_num']
      user_id = message.from_user.id
@@ -757,16 +756,16 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.clear()
  
- @dp.message(TaskStates.waiting_for_proof, F.text == "🔙 Отмена")
- async def cancel_proof_upload(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(TaskStates.waiting_for_proof, F.text == "🔙 Отмена")
+async def cancel_proof_upload(message: types.Message, state: FSMContext, **kwargs):
      await message.answer(
          "❌ Отправка доказательства отменена.",
          reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
      )
      await state.clear()
  
- @dp.callback_query(F.data.startswith("accept_"))
- async def accept_proof(callback: types.CallbackQuery, **kwargs):
+@dp.callback_query(F.data.startswith("accept_"))
+async def accept_proof(callback: types.CallbackQuery, **kwargs):
      if callback.from_user.id not in ADMIN_IDS:
          await callback.answer("⛔ У вас нет прав для этого действия!")
          return
@@ -799,8 +798,8 @@ from aiogram.filters import CommandStart, CommandObject
      await callback.answer("✅ Доказательство принято!")
      await callback.message.edit_reply_markup(reply_markup=None)
  
- @dp.callback_query(F.data.startswith("reject_"))
- async def reject_proof(callback: types.CallbackQuery, **kwargs):
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_proof(callback: types.CallbackQuery, **kwargs):
      if callback.from_user.id not in ADMIN_IDS:
          await callback.answer("⛔ У вас нет прав для этого действия!")
          return
@@ -826,9 +825,9 @@ from aiogram.filters import CommandStart, CommandObject
      await callback.answer("❌ Доказательство отклонено!")
      await callback.message.edit_reply_markup(reply_markup=None)
  
- @dp.message(F.text == "✉️Помощь")
- @check_not_blocked
- async def help_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "✉️Помощь")
+@check_not_blocked
+async def help_handler(message: types.Message, **kwargs):
      await message.answer(
          "ℹ️ Справка по боту:\n\n"
          "• 👀Профиль - ваши данные\n"
@@ -840,9 +839,9 @@ from aiogram.filters import CommandStart, CommandObject
          "По всем вопросам обращайтесь к администратору."
      )
  
- @dp.message(F.text == "🔙 Назад")
- @check_not_blocked
- async def back_handler(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "🔙 Назад")
+@check_not_blocked
+async def back_handler(message: types.Message, state: FSMContext, **kwargs):
      current_state = await state.get_state()
  
      if current_state in [TopStates.waiting_referral_period, TopStates.waiting_task_period]:
@@ -853,31 +852,31 @@ from aiogram.filters import CommandStart, CommandObject
          await message.answer("↩️ Возврат в главное меню", reply_markup=get_main_kb(is_admin))
          await state.clear()
  
- @dp.message(F.text == "👑Админка")
- async def admin_panel(message: types.Message, **kwargs):
+@dp.message(F.text == "👑Админка")
+async def admin_panel(message: types.Message, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          await message.answer("⛔ Доступ запрещен.")
          return
  
      await message.answer("👑 Админ-панель", reply_markup=get_admin_kb())
  
- @dp.message(F.text == "💼 Задания")
- async def tasks_admin_menu(message: types.Message, **kwargs):
+@dp.message(F.text == "💼 Задания")
+async def tasks_admin_menu(message: types.Message, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
      await message.answer("📋 Управление заданиями:", reply_markup=get_tasks_admin_kb())
  
- @dp.message(F.text == "➕ Добавить задание")
- async def add_task_start(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "➕ Добавить задание")
+async def add_task_start(message: types.Message, state: FSMContext, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
      await message.answer("Введите номер нового задания (только цифры):")
      await state.set_state(AddTaskState.waiting_for_task_number)
  
- @dp.message(AddTaskState.waiting_for_task_number)
- async def process_task_number(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(AddTaskState.waiting_for_task_number)
+async def process_task_number(message: types.Message, state: FSMContext, **kwargs):
      try:
          task_num = int(message.text)
          if task_num <= 0:
@@ -893,8 +892,8 @@ from aiogram.filters import CommandStart, CommandObject
      await message.answer("Введите текст задания:")
      await state.set_state(AddTaskState.waiting_for_task_text)
  
- @dp.message(AddTaskState.waiting_for_task_text)
- async def process_task_text(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(AddTaskState.waiting_for_task_text)
+async def process_task_text(message: types.Message, state: FSMContext, **kwargs):
      if not message.text:
          await message.answer("❌ Текст задания не может быть пустым.")
          return
@@ -909,8 +908,8 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.set_state(AddTaskState.waiting_for_task_photo)
  
- @dp.message(AddTaskState.waiting_for_task_photo, F.text == "Пропустить")
- async def skip_task_photo(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(AddTaskState.waiting_for_task_photo, F.text == "Пропустить")
+async def skip_task_photo(message: types.Message, state: FSMContext, **kwargs):
      data = await state.get_data()
      tasks[data['task_num']] = {
          'text': data['text'],
@@ -922,8 +921,8 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.clear()
  
- @dp.message(AddTaskState.waiting_for_task_photo, F.photo)
- async def add_task_with_photo(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(AddTaskState.waiting_for_task_photo, F.photo)
+async def add_task_with_photo(message: types.Message, state: FSMContext, **kwargs):
      data = await state.get_data()
      tasks[data['task_num']] = {
          'text': data['text'],
@@ -935,8 +934,8 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.clear()
  
- @dp.message(F.text == "❌ Удалить задание")
- async def delete_task_start(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "❌ Удалить задание")
+async def delete_task_start(message: types.Message, state: FSMContext, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
@@ -951,8 +950,8 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.set_state(DeleteTaskState.waiting_for_task_number)
  
- @dp.message(DeleteTaskState.waiting_for_task_number)
- async def delete_task_process(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(DeleteTaskState.waiting_for_task_number)
+async def delete_task_process(message: types.Message, state: FSMContext, **kwargs):
      try:
          task_num = int(message.text)
          if task_num not in tasks:
@@ -981,8 +980,8 @@ from aiogram.filters import CommandStart, CommandObject
          await message.answer("❌ Некорректный номер задания.")
      await state.clear()
  
- @dp.message(F.text == "📊 Статистика")
- async def stats_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "📊 Статистика")
+async def stats_handler(message: types.Message, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
@@ -999,8 +998,8 @@ from aiogram.filters import CommandStart, CommandObject
          f"⏳ Ожидают проверки: {len(pending_approvals)}"
      )
  
- @dp.message(F.text == "📥 Экспорт данных")
- async def export_users_data(message: types.Message, **kwargs):
+@dp.message(F.text == "📥 Экспорт данных")
+async def export_users_data(message: types.Message, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
@@ -1070,8 +1069,8 @@ from aiogram.filters import CommandStart, CommandObject
      except Exception as e:
          await message.answer(f"❌ Ошибка при экспорте данных: {str(e)}")
  
- @dp.message(F.text == "🧾 Список пользователей")
- async def users_list_handler(message: types.Message, **kwargs):
+@dp.message(F.text == "🧾 Список пользователей")
+async def users_list_handler(message: types.Message, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
@@ -1087,16 +1086,16 @@ from aiogram.filters import CommandStart, CommandObject
      for i in range(0, len(text), 4000):
          await message.answer(text[i:i+4000])
  
- @dp.message(F.text == "🚫 Заблокировать")
- async def block_user_start(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "🚫 Заблокировать")
+async def block_user_start(message: types.Message, state: FSMContext, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
      await message.answer("Введите ID пользователя для блокировки:")
      await state.set_state(BlockState.waiting_for_id)
  
- @dp.message(BlockState.waiting_for_id)
- async def block_user_process(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(BlockState.waiting_for_id)
+async def block_user_process(message: types.Message, state: FSMContext, **kwargs):
      try:
          user_id = int(message.text)
      except ValueError:
@@ -1108,16 +1107,16 @@ from aiogram.filters import CommandStart, CommandObject
      await message.answer(f"✅ Пользователь {user_id} заблокирован.")
      await state.clear()
  
- @dp.message(F.text == "🔓 Разблокировать")
- async def unblock_user_start(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "🔓 Разблокировать")
+async def unblock_user_start(message: types.Message, state: FSMContext, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
      await message.answer("Введите ID пользователя для разблокировки:")
      await state.set_state(UnblockState.waiting_for_id)
  
- @dp.message(UnblockState.waiting_for_id)
- async def unblock_user_process(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(UnblockState.waiting_for_id)
+async def unblock_user_process(message: types.Message, state: FSMContext, **kwargs):
      try:
          user_id = int(message.text)
      except ValueError:
@@ -1132,16 +1131,16 @@ from aiogram.filters import CommandStart, CommandObject
          await message.answer(f"ℹ️ Пользователь {user_id} не был заблокирован.")
      await state.clear()
  
- @dp.message(F.text == "📨 Рассылка")
- async def broadcast_start(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "📨 Рассылка")
+async def broadcast_start(message: types.Message, state: FSMContext, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
      await message.answer("Введите сообщение для рассылки:")
      await state.set_state(BroadcastState.waiting_for_message)
  
- @dp.message(BroadcastState.waiting_for_message)
- async def broadcast_process(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(BroadcastState.waiting_for_message)
+async def broadcast_process(message: types.Message, state: FSMContext, **kwargs):
      text = message.text
      success = 0
      errors = 0
@@ -1160,16 +1159,16 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.clear()
  
- @dp.message(F.text == "✏️ Редактировать пользователя")
- async def edit_user_start(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(F.text == "✏️ Редактировать пользователя")
+async def edit_user_start(message: types.Message, state: FSMContext, **kwargs):
      if message.from_user.id not in ADMIN_IDS:
          return
  
      await message.answer("Введите ID пользователя для редактирования:")
      await state.set_state(EditUserState.waiting_for_id)
  
- @dp.message(EditUserState.waiting_for_id)
- async def process_user_id(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(EditUserState.waiting_for_id)
+async def process_user_id(message: types.Message, state: FSMContext, **kwargs):
      try:
          user_id = int(message.text)
      except ValueError:
@@ -1190,8 +1189,8 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.set_state(EditUserState.waiting_for_field)
  
- @dp.message(EditUserState.waiting_for_field, F.text.in_(["💰 Баланс", "👥 Рефералы", "✅ Выполнено заданий"]))
- async def process_edit_field(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(EditUserState.waiting_for_field, F.text.in_(["💰 Баланс", "👥 Рефералы", "✅ Выполнено заданий"]))
+async def process_edit_field(message: types.Message, state: FSMContext, **kwargs):
      field_map = {
          "💰 Баланс": "balance",
          "👥 Рефералы": "referrals",
@@ -1208,13 +1207,13 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.set_state(EditUserState.waiting_for_value)
  
- @dp.message(EditUserState.waiting_for_field, F.text == "🔙 Назад")
- async def back_from_edit_user(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(EditUserState.waiting_for_field, F.text == "🔙 Назад")
+async def back_from_edit_user(message: types.Message, state: FSMContext, **kwargs):
      await message.answer("👑 Админ-панель", reply_markup=get_admin_kb())
      await state.clear()
  
- @dp.message(EditUserState.waiting_for_value, F.text == "🔙 Назад")
- async def back_from_edit_value(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(EditUserState.waiting_for_value, F.text == "🔙 Назад")
+async def back_from_edit_value(message: types.Message, state: FSMContext, **kwargs):
      data = await state.get_data()
      await message.answer(
          f"✏️ Редактирование пользователя {data['user_id']}\n"
@@ -1223,8 +1222,8 @@ from aiogram.filters import CommandStart, CommandObject
      )
      await state.set_state(EditUserState.waiting_for_field)
  
- @dp.message(EditUserState.waiting_for_value)
- async def process_edit_value(message: types.Message, state: FSMContext, **kwargs):
+@dp.message(EditUserState.waiting_for_value)
+async def process_edit_value(message: types.Message, state: FSMContext, **kwargs):
      data = await state.get_data()
      user_id = data['user_id']
      field = data['field']
@@ -1269,7 +1268,7 @@ from aiogram.filters import CommandStart, CommandObject
  # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ТОПОВ
  # =====================
  
- async def get_referral_top(period: str = "week") -> str:
+async def get_referral_top(period: str = "week") -> str:
      now = datetime.now()
  
      if period == "week":
@@ -1307,7 +1306,7 @@ from aiogram.filters import CommandStart, CommandObject
  
      return result
  
- async def get_tasks_top(period: str = "week") -> str:
+async def get_tasks_top(period: str = "week") -> str:
      now = datetime.now()
  
      if period == "week":
@@ -1349,7 +1348,7 @@ from aiogram.filters import CommandStart, CommandObject
  # ЗАПУСК БОТА
  # =====================
  
- async def run_bot():
+async def run_bot():
      while True:
          try:
              print("Запуск бота в режиме polling...")
@@ -1359,9 +1358,9 @@ from aiogram.filters import CommandStart, CommandObject
              print("Перезапуск через 10 секунд...")
              await asyncio.sleep(10)
  
- async def main():
+async def main():
      await run_bot()
  
- if __name__ == "__main__":
+if __name__ == "__main__":
      # Убедитесь, что все асинхронные операции выполняются правильно
      asyncio.run(main())
