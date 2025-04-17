@@ -43,7 +43,6 @@ def run_fake_server():
      server = HTTPServer(('0.0.0.0', port), Handler)
      print(f"Fake web server running on port {port}")
      server.serve_forever()
- 
 threading.Thread(target=run_fake_server).start()
  
  
