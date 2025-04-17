@@ -23,7 +23,7 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # === НАСТРОЙКИ БОТА ===
-API_TOKEN = '7740361367:AAE9p-74SBUa1C2W74vypBuzSlmUW-BHv_0'
+API_TOKEN = '7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw'
 ADMIN_IDS = [1041720539, 6216901034]
 CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQ0V3YNV4O0GHcWTvSbzkEar43'
 CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
