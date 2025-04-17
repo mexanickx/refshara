@@ -4,14 +4,6 @@ import random
 import pandas as pd
 import io
 import signal
-from aiogram import executor
-
-def handle_shutdown(signal, frame):
-    print("Gracefully shutting down...")
-    # Здесь можно добавить cleanup логику
-    exit(0)
-
-signal.signal(signal.SIGTERM, handle_shutdown)
 import logging
 
 logging.basicConfig(level=logging.INFO)
