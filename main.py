@@ -1345,8 +1345,19 @@ async def get_tasks_top(period: str = "week") -> str:
 # ЗАПУСК БОТА
 # =====================
 
+async def run_bot():
+    while True:
+        try:
+            print("Запуск бота в режиме polling...")
+            await dp.start_polling(bot, skip_updates=True)
+        except Exception as e:
+            print(f"Ошибка в работе бота: {e}")
+            print("Перезапуск через 10 секунд...")
+            await asyncio.sleep(10)
+
 async def main():
-    await dp.start_polling(bot)
+    await run_bot()
 
 if __name__ == "__main__":
+    # Убедитесь, что все асинхронные операции выполняются правильно
     asyncio.run(main())
