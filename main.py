@@ -21,6 +21,8 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import os
+TOKEN = os.environ.get("7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw")
 import threading
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
