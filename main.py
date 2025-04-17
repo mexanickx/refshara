@@ -5,14 +5,38 @@ import pandas as pd
 import io
 import logging
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+async def on_startup(dp):
+    logger.info("Bot started")
+
+async def on_shutdown(dp):
+    logger.info("Shutting down..")
+    await dp.storage.close()
+    await dp.storage.wait_closed()
+    logger.info("Bot down")
 import requests
 from datetime import datetime, timedelta
 from collections import defaultdict
+import signal
+from aiogram import executor
 
+def handle_shutdown(signal, frame):
+    print("Gracefully shutting down...")
+    # Здесь можно добавить cleanup логику
+    exit(0)
+
+signal.signal(signal.SIGTERM, handle_shutdown)
+executor.start_webhook(
+    dispatcher=dp,
+    webhook_path=WEBHOOK_PATH,
+    on_startup=on_startup,
+    on_shutdown=on_shutdown,
+    skip_updates=True,
+    host=WEBAPP_HOST,
+    port=WEBAPP_PORT,
+)
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import (
     ReplyKeyboardMarkup,
