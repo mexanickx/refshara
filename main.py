@@ -21,6 +21,25 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import threading
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# запускаем фейковый сервер, чтобы Render не ругался
+def run_fake_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'Bot is running!')
+
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    print(f"Fake web server running on port {port}")
+    server.serve_forever()
+
+threading.Thread(target=run_fake_server).start()
+
 
 # === НАСТРОЙКИ БОТА ===
 API_TOKEN = '7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw'
