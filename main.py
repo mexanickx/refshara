@@ -3,6 +3,12 @@ import inspect
 import random
 import pandas as pd
 import io
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 import requests
 from datetime import datetime, timedelta
 from collections import defaultdict
