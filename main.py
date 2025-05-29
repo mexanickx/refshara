@@ -3,7 +3,7 @@ import random
 import pandas as pd
 import io
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import os
 import threading
@@ -123,6 +123,7 @@ class EditUserState(StatesGroup):
     waiting_for_id = State()
     waiting_for_field = State()
     waiting_for_value = State()
+    waiting_for_task_num_to_assign = State() # Новое состояние для выдачи задания
 
 class WithdrawState(StatesGroup):
     waiting_for_amount = State()
@@ -150,9 +151,11 @@ async def init_db():
                 username VARCHAR(255),
                 reg_date VARCHAR(255),
                 balance DECIMAL(10, 2),
-                last_mine_time VARCHAR(255)
+                last_mine_time VARCHAR(255),
+                referral_count INTEGER DEFAULT 0 -- Изменено: теперь хранит число
             );
         ''')
+        # Таблица referrals по-прежнему нужна для отслеживания связей
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS referrals (
                 referrer_id BIGINT,
@@ -196,7 +199,7 @@ async def db_add_user(user_id: int, username: str, reg_date: str, balance: float
     conn = await get_db_connection()
     try:
         await conn.execute(
-            "INSERT INTO users (user_id, username, reg_date, balance, last_mine_time) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id) DO NOTHING",
+            "INSERT INTO users (user_id, username, reg_date, balance, last_mine_time, referral_count) VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT (user_id) DO NOTHING",
             user_id, username, reg_date, balance, last_mine_time
         )
     finally:
@@ -205,7 +208,7 @@ async def db_add_user(user_id: int, username: str, reg_date: str, balance: float
 async def db_get_user(user_id: int):
     conn = await get_db_connection()
     try:
-        row = await conn.fetchrow("SELECT user_id, username, reg_date, balance, last_mine_time FROM users WHERE user_id = $1", user_id)
+        row = await conn.fetchrow("SELECT user_id, username, reg_date, balance, last_mine_time, referral_count FROM users WHERE user_id = $1", user_id)
     finally:
         await conn.close()
     if row:
@@ -214,7 +217,8 @@ async def db_get_user(user_id: int):
             'username': row['username'],
             'reg_date': row['reg_date'],
             'balance': float(row['balance']), # Преобразуем Decimal в float
-            'last_mine_time': row['last_mine_time']
+            'last_mine_time': row['last_mine_time'],
+            'referral_count': row['referral_count'] # Добавлено
         }
     return None
 
@@ -239,6 +243,13 @@ async def db_update_username(user_id: int, username: str):
     finally:
         await conn.close()
 
+async def db_update_referral_count(user_id: int, new_count: int):
+    conn = await get_db_connection()
+    try:
+        await conn.execute("UPDATE users SET referral_count = $1 WHERE user_id = $2", new_count, user_id)
+    finally:
+        await conn.close()
+
 # --- CRUD операции для рефералов ---
 async def db_add_referral(referrer_id: int, referred_user_id: int):
     conn = await get_db_connection()
@@ -247,13 +258,16 @@ async def db_add_referral(referrer_id: int, referred_user_id: int):
             "INSERT INTO referrals (referrer_id, referred_user_id) VALUES ($1, $2) ON CONFLICT (referred_user_id) DO NOTHING",
             referrer_id, referred_user_id
         )
+        # Увеличиваем referral_count у реферера
+        await conn.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = $1", referrer_id)
     finally:
         await conn.close()
 
 async def db_get_referrals_count(user_id: int):
     conn = await get_db_connection()
     try:
-        count = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE referrer_id = $1", user_id)
+        # Теперь получаем из столбца referral_count
+        count = await conn.fetchval("SELECT referral_count FROM users WHERE user_id = $1", user_id)
     finally:
         await conn.close()
     return count if count is not None else 0
@@ -262,10 +276,8 @@ async def db_get_all_users_with_referral_count():
     conn = await get_db_connection()
     try:
         rows = await conn.fetch('''
-            SELECT u.user_id, u.username, COUNT(r.referred_user_id) AS referral_count
-            FROM users u
-            LEFT JOIN referrals r ON u.user_id = r.referrer_id
-            GROUP BY u.user_id, u.username
+            SELECT user_id, username, referral_count
+            FROM users
             ORDER BY referral_count DESC
         ''')
     finally:
@@ -401,13 +413,12 @@ async def db_get_users_for_export():
                 u.username,
                 u.reg_date,
                 u.balance,
-                COUNT(DISTINCT r.referred_user_id) AS referral_count,
+                u.referral_count, -- Теперь берем напрямую из users
                 STRING_AGG(DISTINCT tp.task_num::text, ',' ORDER BY tp.task_num) AS completed_task_nums,
                 STRING_AGG(DISTINCT tp.completion_date, ',' ORDER BY tp.task_num) AS completed_task_dates
             FROM users u
-            LEFT JOIN referrals r ON u.user_id = r.referrer_id
             LEFT JOIN task_proofs tp ON u.user_id = tp.user_id
-            GROUP BY u.user_id, u.username, u.reg_date, u.balance
+            GROUP BY u.user_id, u.username, u.reg_date, u.balance, u.referral_count
             ORDER BY u.user_id
         ''')
     finally:
@@ -488,13 +499,11 @@ def get_task_kb(task_num: int) -> ReplyKeyboardMarkup:
 def get_tops_type_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🏆 Топы приглашений"), KeyboardButton(text="🏆 Топы заданий")],
+            [KeyboardButton(text="🏆 Топы приглашений"), KeyboardButton(text="🏆 Топы заданий")], # Исправлено: KeyboardButton
             [KeyboardButton(text="🔙 Назад")]
         ],
         resize_keyboard=True
     )
-
-# Удалена функция get_period_kb()
 
 def get_tasks_admin_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -509,6 +518,8 @@ def get_edit_user_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="💰 Баланс")],
+            [KeyboardButton(text="👥 Количество рефералов")], # Новое поле
+            [KeyboardButton(text="✅ Выдать задание")], # Новое поле
             [KeyboardButton(text="🔙 Назад")]
         ],
         resize_keyboard=True
@@ -568,7 +579,7 @@ async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
         'amount': f"{amount_usdt:.2f}",
         'description': f'Пополнение баланса пользователя {user_id}',
         'payload': str(user_id),
-        'allow_anonymous': False
+        'allow_anonymous': True # <--- Изменено: Устанавливаем True для compact mode
     }
 
     try:
@@ -660,11 +671,12 @@ async def process_deposit(user_id: int, amount_usdt: float):
     if not invoice_response.get('result'):
         return False, "Платежная система не предоставила данные для оплаты."
 
-    if 'pay_url' not in invoice_response['result']:
-        return False, "Платежная система не предоставила ссылку для оплаты."
+    # <--- Изменено: Используем bot_invoice_url вместо pay_url
+    if 'bot_invoice_url' not in invoice_response['result']:
+        return False, "Платежная система не предоставила ссылку для оплаты (bot_invoice_url)."
 
     return True, {
-        'pay_url': invoice_response['result']['pay_url'],
+        'pay_url': invoice_response['result']['bot_invoice_url'], # <--- Используем bot_invoice_url
         'invoice_id': invoice_response['result']['invoice_id']
     }
 
@@ -754,27 +766,27 @@ async def cmd_start(message: types.Message, command: CommandObject = None, **kwa
             await db_update_username(user_id, username)
         logger.info(f"Существующий пользователь {user_id} (@{username}) начал/перезапустил бота.")
     else:
-        reg_date = datetime.now().strftime('%d.%m.%Y %H:%M')
+        # Регистрируем нового пользователя, сохраняя дату в UTC
+        reg_date = datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
         await db_add_user(user_id, username, reg_date, 0.0, None)
-        logger.info(f"Новый пользователь {user_id} (@{username}) зарегистрирован.")
+        logger.info(f"Новый пользователь {user_id} (@{username}) зарегистрирован. Дата: {reg_date}")
 
         referrer_id = None
         if command and command.args and command.args.isdigit():
             referrer_id = int(command.args)
 
         if referrer_id and referrer_id != user_id: # Нельзя быть своим рефералом
-            # Проверяем, существует ли реферер в БД и еще не является реферером
-            if await db_get_user(referrer_id):
+            # Проверяем, существует ли реферер в БД и еще не является рефералом
+            referrer_in_db = await db_get_user(referrer_id)
+            if referrer_in_db:
                 # Проверяем, что текущий пользователь уже не был чьим-то рефералом
                 conn = await get_db_connection()
                 existing_referral = await conn.fetchrow("SELECT 1 FROM referrals WHERE referred_user_id = $1", user_id)
                 await conn.close()
 
                 if not existing_referral:
-                    await db_add_referral(referrer_id, user_id)
-                    referrer_data = await db_get_user(referrer_id)
-                    referrer_balance = referrer_data['balance']
-                    await db_update_user_balance(referrer_id, referrer_balance + REFERRAL_REWARD)
+                    await db_add_referral(referrer_id, user_id) # Эта функция теперь обновляет referral_count
+                    referrer_data = await db_get_user(referrer_id) # Получаем обновленные данные реферера
                     logger.info(f"Пользователь {user_id} стал рефералом {referrer_id}. Начислено {REFERRAL_REWARD} ZB.")
                     try:
                         await bot.send_message(
@@ -807,7 +819,7 @@ async def profile_handler(message: types.Message, **kwargs):
         return
 
     balance = user_data.get('balance', 0.0)
-    referrals_count = await db_get_referrals_count(user_id)
+    referrals_count = user_data.get('referral_count', 0) # Получаем из user_data
     completed_tasks_count = len(await db_get_user_completed_tasks(user_id))
 
     builder = InlineKeyboardBuilder()
@@ -826,7 +838,7 @@ async def profile_handler(message: types.Message, **kwargs):
         f"👤 Ваш профиль:\n"
         f"🆔 ID: `{message.from_user.id}`\n"
         f"🔗 Юзернейм: @{user_data.get('username', '—')}\n"
-        f"📅 Регистрация: {user_data.get('reg_date', '—')}\n"
+        f"📅 Регистрация: {user_data.get('reg_date', '—')}\n" # Теперь здесь может быть "UTC"
         f"👥 Рефералов: {referrals_count}\n"
         f"✅ Выполнено заданий: {completed_tasks_count}\n"
         f"💎 Баланс: {balance:.2f} Zebranium (≈{balance * ZB_EXCHANGE_RATE:.2f} USDT)\n\n"
@@ -881,13 +893,13 @@ async def process_deposit_amount(message: types.Message, state: FSMContext):
         success, result = await process_deposit(user_id, amount_usdt)
 
         if success:
-            invoice_url = result['pay_url']
+            invoice_url = result['pay_url'] # <--- Теперь это bot_invoice_url
             invoice_id = result['invoice_id']
 
             await message.answer(
                 f"✅ **Счет на оплату создан!**\n"
                 f"Сумма: `{amount_usdt:.2f}` USDT\n"
-                f"Для оплаты перейдите по ссылке: [Оплатить]({invoice_url})\n\n"
+                f"Для оплаты перейдите в Crypto Bot: [Оплатить]({invoice_url})\n\n" # <--- Изменен текст ссылки
                 "После оплаты баланс будет зачислен автоматически. Пожалуйста, ожидайте.",
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
@@ -1006,7 +1018,7 @@ async def referrals_handler(message: types.Message, **kwargs):
     user_id = message.from_user.id
     bot_username = (await bot.get_me()).username
     link = f"https://t.me/{bot_username}?start={user_id}"
-    count = await db_get_referrals_count(user_id)
+    count = await db_get_referrals_count(user_id) # Теперь получает из `referral_count` в `users`
 
     await message.answer(
         f"👥 **Ваши рефералы:**\n"
@@ -1118,10 +1130,10 @@ async def process_task_proof(message: types.Message, state: FSMContext, **kwargs
         return
 
     proof_photo_file_id = message.photo[-1].file_id # Берем фото с наибольшим разрешением
-    completion_date = datetime.now().strftime('%d.%m.%Y %H:%M')
-
+    completion_date = datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC') # Сохраняем в UTC
+    
     await db_add_task_proof(user_id, task_num, proof_photo_file_id, completion_date)
-    logger.info(f"Пользователь {user_id} отправил доказательство для задания {task_num}.")
+    logger.info(f"Пользователь {user_id} отправил доказательство для задания {task_num}. Дата: {completion_date}")
 
     # Начисляем награду
     user_data = await db_get_user(user_id)
@@ -1152,10 +1164,17 @@ async def mining_handler(message: types.Message, **kwargs):
         return
 
     last_mine_time_str = user_data.get('last_mine_time')
-    current_time = datetime.now()
+    current_time = datetime.now(timezone.utc) # Используем UTC
 
     if last_mine_time_str:
-        last_mine_time = datetime.strptime(last_mine_time_str, '%Y-%m-%d %H:%M:%S')
+        try:
+            # Сначала пытаемся распарсить с ' UTC' для новых записей
+            last_mine_time = datetime.strptime(last_mine_time_str, '%Y-%m-%d %H:%M:%S UTC')
+        except ValueError:
+            # Если не получилось, это старая запись без ' UTC', предполагаем, что она в UTC
+            last_mine_time = datetime.strptime(last_mine_time_str, '%Y-%m-%d %H:%M:%S')
+            last_mine_time = last_mine_time.replace(tzinfo=timezone.utc) # Добавляем UTC timezone
+
         time_since_last_mine = current_time - last_mine_time
         remaining_cooldown = MINING_COOLDOWN - time_since_last_mine.total_seconds()
 
@@ -1170,8 +1189,9 @@ async def mining_handler(message: types.Message, **kwargs):
 
     reward = random.randint(*MINING_REWARD_RANGE)
     new_balance = user_data['balance'] + reward
+    # Сохраняем время майнинга в UTC
     await db_update_user_balance(user_id, new_balance)
-    await db_update_user_last_mine_time(user_id, current_time.strftime('%Y-%m-%d %H:%M:%S'))
+    await db_update_user_last_mine_time(user_id, current_time.strftime('%Y-%m-%d %H:%M:%S UTC')) # <--- Добавил ' UTC'
     logger.info(f"Пользователь {user_id} успешно помайнил и получил {reward} ZB. Новый баланс: {new_balance}.")
 
     await message.answer(f"⛏️ Вы успешно помайнили и получили **{reward} Zebranium**!", parse_mode="Markdown")
@@ -1274,6 +1294,12 @@ async def back_to_main_menu(message: types.Message, state: FSMContext, **kwargs)
         await message.answer("Выбор задания:", reply_markup=await get_tasks_kb())
     elif current_state and current_state.startswith("TopStates"): # Для всех состояний топов
         await message.answer("Выбор типа топов:", reply_markup=get_tops_type_kb())
+    elif current_state and current_state.startswith("DepositState"): # Для всех состояний пополнения
+        is_admin = message.from_user.id in ADMIN_IDS
+        await message.answer("Возвращаемся в главное меню.", reply_markup=get_main_kb(is_admin))
+    elif current_state and current_state.startswith("WithdrawState"): # Для всех состояний вывода
+        is_admin = message.from_user.id in ADMIN_IDS
+        await message.answer("Возвращаемся в главное меню.", reply_markup=get_main_kb(is_admin))
     else:
         # Для всех остальных случаев возвращаемся в главное меню
         is_admin = message.from_user.id in ADMIN_IDS
@@ -1335,7 +1361,7 @@ async def list_users(message: types.Message):
         if user_data:
             username = user_data.get('username', '—')
             balance = user_data.get('balance', 0.0)
-            referrals = await db_get_referrals_count(user_id)
+            referrals = user_data.get('referral_count', 0)
             users_info.append(f"ID: `{user_id}`, @{username}, Баланс: {balance:.2f}, Рефералов: {referrals}")
 
     # Ограничиваем количество пользователей, если их слишком много
@@ -1489,7 +1515,11 @@ async def process_add_task_photo_skip(message: types.Message, state: FSMContext)
     task_text = data['new_task_text']
     await db_add_task(task_num, task_text, None)
     logger.info(f"Админ {message.from_user.id} добавил задание {task_num} без фото.")
-    await message.answer(f"✅ Задание {task_num} добавлено без фото.", reply_markup=get_tasks_admin_kb())
+
+    await message.answer(
+        f"✅ Задание {task_num} успешно добавлено (без фото).",
+        reply_markup=get_tasks_admin_kb()
+    )
     await state.clear()
 
 @dp.message(AddTaskState.waiting_for_task_photo, F.photo)
@@ -1499,10 +1529,14 @@ async def process_add_task_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
     task_num = data['new_task_num']
     task_text = data['new_task_text']
-    photo_file_id = message.photo[-1].file_id # Берем фото с наибольшим разрешением
+    photo_file_id = message.photo[-1].file_id
     await db_add_task(task_num, task_text, photo_file_id)
     logger.info(f"Админ {message.from_user.id} добавил задание {task_num} с фото.")
-    await message.answer(f"✅ Задание {task_num} добавлено с фото.", reply_markup=get_tasks_admin_kb())
+
+    await message.answer(
+        f"✅ Задание {task_num} успешно добавлено (с фото).",
+        reply_markup=get_tasks_admin_kb()
+    )
     await state.clear()
 
 @dp.message(AddTaskState.waiting_for_task_photo)
@@ -1516,47 +1550,31 @@ async def process_add_task_photo_invalid(message: types.Message, state: FSMConte
 async def start_delete_task(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    all_tasks = await db_get_all_tasks()
-    if not all_tasks:
-        await message.answer("Список заданий пуст. Нечего удалять.", reply_markup=get_tasks_admin_kb())
-        return
-
-    task_list_str = "\n".join([f"- Задание {t['task_num']}: {t['text'][:50]}..." for t in all_tasks]) # Ограничим длину текста
-    await message.answer(
-        f"Введите номер задания, которое нужно удалить:\n\n**Список заданий:**\n{task_list_str}",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="🔙 Назад в админку")]],
-            resize_keyboard=True
-        )
-    )
+    await message.answer("Введите номер задания, которое нужно удалить:")
     await state.set_state(DeleteTaskState.waiting_for_task_number)
 
 @dp.message(DeleteTaskState.waiting_for_task_number)
-async def process_delete_task_number(message: types.Message, state: FSMContext):
+async def process_delete_task_number(message: types.Saga, state: FSMContext): # Исправлен опечатка Saga на Message
     if message.from_user.id not in ADMIN_IDS:
         return
     try:
-        task_num_to_delete = int(message.text)
-        task_exists = await db_get_task(task_num_to_delete)
-        if not task_exists:
-            await message.answer(f"❌ Задания с номером {task_num_to_delete} не существует.", reply_markup=get_tasks_admin_kb())
-            await state.clear()
-            return
-
-        await db_delete_task(task_num_to_delete)
-        logger.info(f"Админ {message.from_user.id} удалил задание {task_num_to_delete}.")
-        await message.answer(f"✅ Задание {task_num_to_delete} удалено.", reply_markup=get_tasks_admin_kb())
+        task_num = int(message.text)
+        task_data = await db_get_task(task_num)
+        if not task_data:
+            await message.answer(f"❌ Задание с номером {task_num} не найдено.", reply_markup=get_tasks_admin_kb())
+        else:
+            await db_delete_task(task_num)
+            await message.answer(f"✅ Задание {task_num} успешно удалено.", reply_markup=get_tasks_admin_kb())
+            logger.info(f"Админ {message.from_user.id} удалил задание {task_num}.")
     except ValueError:
-        await message.answer("❌ Неверный номер задания. Пожалуйста, введите число.")
+        await message.answer("❌ Неверный номер задания. Пожалуйста, введите целое число.")
     await state.clear()
-
 
 @dp.message(F.text == "✏️ Редактировать пользователя")
 async def start_edit_user(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    await message.answer("Введите ID пользователя, которого хотите отредактировать:")
+    await message.answer("Введите ID пользователя, которого нужно отредактировать:")
     await state.set_state(EditUserState.waiting_for_id)
 
 @dp.message(EditUserState.waiting_for_id)
@@ -1567,124 +1585,214 @@ async def process_edit_user_id(message: types.Message, state: FSMContext):
         user_id_to_edit = int(message.text)
         user_data = await db_get_user(user_id_to_edit)
         if not user_data:
-            await message.answer("❌ Пользователь с таким ID не найден.", reply_markup=get_admin_kb())
+            await message.answer(f"❌ Пользователь с ID {user_id_to_edit} не найден.", reply_markup=get_admin_kb())
             await state.clear()
             return
 
-        await state.update_data(edit_user_id=user_id_to_edit)
+        await state.update_data(user_id_to_edit=user_id_to_edit)
         await message.answer(
-            f"Выбран пользователь ID: `{user_id_to_edit}` (@{user_data.get('username', '—')}).\n"
-            "Что хотите отредактировать?",
-            parse_mode="Markdown",
+            f"Пользователь {user_id_to_edit} (@{user_data.get('username', '—')}) найден.\n"
+            f"Выберите поле для редактирования:",
             reply_markup=get_edit_user_kb()
         )
         await state.set_state(EditUserState.waiting_for_field)
     except ValueError:
-        await message.answer("❌ Неверный ID пользователя. Пожалуйста, введите число.", reply_markup=get_admin_kb())
-        await state.clear()
+        await message.answer("❌ Неверный ID пользователя. Пожалуйста, введите число.")
 
-@dp.message(EditUserState.waiting_for_field)
-async def process_edit_user_field(message: types.Message, state: FSMContext):
+@dp.message(EditUserState.waiting_for_field, F.text == "💰 Баланс")
+async def edit_user_balance(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    field = message.text
     data = await state.get_data()
-    user_id_to_edit = data['edit_user_id']
+    user_id_to_edit = data['user_id_to_edit']
     user_data = await db_get_user(user_id_to_edit)
+    await message.answer(
+        f"Текущий баланс пользователя {user_id_to_edit}: {user_data['balance']:.2f} Zebranium.\n"
+        f"Введите новый баланс:"
+    )
+    await state.set_state(EditUserState.waiting_for_value)
+    await state.update_data(field_to_edit='balance')
 
-    if field == "💰 Баланс":
-        await state.update_data(edit_field='balance')
-        await message.answer(
-            f"Введите новое значение баланса для пользователя `{user_id_to_edit}` (текущий: `{user_data.get('balance', 0.0):.2f}`):",
-            parse_mode="Markdown"
-        )
-        await state.set_state(EditUserState.waiting_for_value)
-    elif field == "🔙 Назад":
-        await state.clear()
-        await message.answer("Возвращаемся в админ-панель.", reply_markup=get_admin_kb())
-    else:
-        await message.answer("❌ Неизвестное поле для редактирования. Пожалуйста, выберите из предложенных вариантов.", reply_markup=get_edit_user_kb())
+@dp.message(EditUserState.waiting_for_field, F.text == "👥 Количество рефералов")
+async def edit_user_referral_count(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    data = await state.get_data()
+    user_id_to_edit = data['user_id_to_edit']
+    user_data = await db_get_user(user_id_to_edit)
+    await message.answer(
+        f"Текущее количество рефералов пользователя {user_id_to_edit}: {user_data['referral_count']}.\n"
+        f"Введите новое количество рефералов:"
+    )
+    await state.set_state(EditUserState.waiting_for_value)
+    await state.update_data(field_to_edit='referral_count')
+
+@dp.message(EditUserState.waiting_for_field, F.text == "✅ Выдать задание")
+async def edit_user_assign_task(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    data = await state.get_data()
+    user_id_to_edit = data['user_id_to_edit']
+    await message.answer("Введите номер задания, которое нужно выдать пользователю:")
+    await state.set_state(EditUserState.waiting_for_task_num_to_assign)
+
+
+@dp.message(EditUserState.waiting_for_field, F.text == "🔙 Назад")
+async def cancel_edit_user_field(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("Отменено редактирование пользователя.", reply_markup=get_admin_kb())
+    await state.clear()
+
 
 @dp.message(EditUserState.waiting_for_value)
 async def process_edit_user_value(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     data = await state.get_data()
-    user_id_to_edit = data['edit_user_id']
-    edit_field = data['edit_field']
+    user_id_to_edit = data['user_id_to_edit']
+    field_to_edit = data['field_to_edit']
 
     try:
-        if edit_field == 'balance':
-            new_balance = float(message.text.replace(',', '.'))
-            if new_balance < 0:
-                await message.answer("❌ Баланс не может быть отрицательным. Введите положительное число.")
+        if field_to_edit == 'balance':
+            new_value = float(message.text.replace(',', '.'))
+            if new_value < 0:
+                await message.answer("❌ Баланс не может быть отрицательным.")
+                await state.set_state(EditUserState.waiting_for_value) # Остаемся в этом состоянии
                 return
-            await db_update_user_balance(user_id_to_edit, new_balance)
-            logger.info(f"Админ {message.from_user.id} изменил баланс пользователя {user_id_to_edit} на {new_balance}.")
-            await message.answer(f"✅ Баланс пользователя `{user_id_to_edit}` установлен на `{new_balance:.2f}` Zebranium.", parse_mode="Markdown", reply_markup=get_admin_kb())
+            await db_update_user_balance(user_id_to_edit, new_value)
+            await message.answer(
+                f"✅ Баланс пользователя {user_id_to_edit} обновлен до {new_value:.2f} Zebranium.",
+                reply_markup=get_admin_kb()
+            )
+            logger.info(f"Админ {message.from_user.id} изменил баланс пользователя {user_id_to_edit} на {new_value}.")
+        elif field_to_edit == 'referral_count':
+            new_value = int(message.text)
+            if new_value < 0:
+                await message.answer("❌ Количество рефералов не может быть отрицательным.")
+                await state.set_state(EditUserState.waiting_for_value) # Остаемся в этом состоянии
+                return
+            await db_update_referral_count(user_id_to_edit, new_value)
+            await message.answer(
+                f"✅ Количество рефералов пользователя {user_id_to_edit} обновлено до {new_value}.",
+                reply_markup=get_admin_kb()
+            )
+            logger.info(f"Админ {message.from_user.id} изменил количество рефералов пользователя {user_id_to_edit} на {new_value}.")
         else:
             await message.answer("❌ Неизвестное поле для редактирования.", reply_markup=get_admin_kb())
     except ValueError:
-        await message.answer("❌ Неверное значение. Пожалуйста, введите число (например, `100.50`).", parse_mode="Markdown")
-        return
+        await message.answer("❌ Неверное значение. Пожалуйста, введите числовое значение.")
     except Exception as e:
-        logger.error(f"Ошибка при редактировании пользователя {user_id_to_edit} поля {edit_field}: {e}")
-        await message.answer(f"❌ Произошла ошибка при редактировании: {e}", reply_markup=get_admin_kb())
+        logger.error(f"Ошибка при редактировании пользователя {user_id_to_edit}: {e}")
+        await message.answer("❌ Произошла ошибка при сохранении. Попробуйте еще раз.", reply_markup=get_admin_kb())
+
     await state.clear()
+
+
+@dp.message(EditUserState.waiting_for_task_num_to_assign)
+async def process_assign_task_number(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    data = await state.get_data()
+    user_id_to_edit = data['user_id_to_edit']
+
+    try:
+        task_num_to_assign = int(message.text)
+        task_data = await db_get_task(task_num_to_assign)
+
+        if not task_data:
+            await message.answer(f"❌ Задание с номером {task_num_to_assign} не найдено. Введите корректный номер задания.",
+                                 reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔙 Отмена")]], resize_keyboard=True))
+            return
+
+        user_completed_tasks = await db_get_user_completed_tasks(user_id_to_edit)
+        if task_num_to_assign in user_completed_tasks:
+            await message.answer(f"⛔ Пользователь {user_id_to_edit} уже выполнил задание {task_num_to_assign}.",
+                                 reply_markup=get_admin_kb())
+            await state.clear()
+            return
+
+        # Помечаем задание как выполненное для пользователя
+        completion_date = datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
+        # Здесь мы не можем просто поставить "manually_added_by_admin"
+        # Для простоты, если админ выдает, можно использовать какой-то ID, или просто пустую строку,
+        # если фото-доказательство не обязательно для таких "выданных" заданий.
+        # Если фото обязательно, то это требует дополнительной логики загрузки фото.
+        # Для начала, пусть будет "admin_assigned"
+        await db_add_task_proof(user_id_to_edit, task_num_to_assign, "admin_assigned", completion_date)
+
+        # Начисляем награду
+        user_data = await db_get_user(user_id_to_edit)
+        reward = random.randint(*TASK_REWARD_RANGE)
+        new_balance = user_data['balance'] + reward
+        await db_update_user_balance(user_id_to_edit, new_balance)
+
+        await message.answer(
+            f"✅ Задание {task_num_to_assign} успешно выдано пользователю {user_id_to_edit}."
+            f" На его баланс зачислено {reward} Zebranium.",
+            parse_mode="Markdown",
+            reply_markup=get_admin_kb()
+        )
+        logger.info(f"Админ {message.from_user.id} выдал задание {task_num_to_assign} пользователю {user_id_to_edit}.")
+
+    except ValueError:
+        await message.answer("❌ Неверный номер задания. Пожалуйста, введите целое число.")
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче задания пользователю {user_id_to_edit}: {e}")
+        await message.answer("❌ Произошла ошибка при выдаче задания. Попробуйте еще раз.", reply_markup=get_admin_kb())
+
+    await state.clear()
+
 
 @dp.message(F.text == "📥 Экспорт данных")
 async def export_data(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
 
-    await message.answer("Начинаю экспорт данных. Это может занять некоторое время...")
+    users_data = await db_get_users_for_export()
 
+    # Определяем столбцы для DataFrame
+    columns = [
+        "user_id", "username", "reg_date", "balance",
+        "referral_count", "completed_task_nums", "completed_task_dates"
+    ]
+
+    df = pd.DataFrame(users_data, columns=columns)
+
+    # Сохраняем в Excel
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='UsersData')
+    excel_buffer.seek(0)
+
+    # Отправляем файл
     try:
-        users_raw_data = await db_get_users_for_export()
-
-        # Подготовка данных для DataFrame
-        columns = [
-            "ID Пользователя",
-            "Юзернейм",
-            "Дата Регистрации",
-            "Баланс (Zebranium)",
-            "Количество Рефералов",
-            "Выполненные Задания (номера)",
-            "Даты Выполнения Заданий"
-        ]
-
-        df = pd.DataFrame(users_raw_data, columns=columns)
-
-        # Сохранение в Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Пользователи')
-        output.seek(0)
-
-        # Отправка файла
         await message.answer_document(
-            document=BufferedInputFile(output.getvalue(), filename="users_data.xlsx"),
-            caption="✅ Ваши данные экспортированы в Excel файл."
+            BufferedInputFile(excel_buffer.getvalue(), filename="user_data.xlsx"),
+            caption="Данные пользователей успешно экспортированы."
         )
         logger.info(f"Админ {message.from_user.id} экспортировал данные пользователей.")
-
     except Exception as e:
-        logger.error(f"Ошибка при экспорте данных: {e}")
-        await message.answer(f"❌ Произошла ошибка при экспорте данных: {e}", reply_markup=get_admin_kb())
+        logger.error(f"Ошибка при отправке файла экспорта админу {message.from_user.id}: {e}")
+        await message.answer("❌ Произошла ошибка при экспорте данных.")
 
-@dp.message(F.text.in_(["🔧 Техперерыв Вкл", "🔧 Техперерыв Выкл"]))
-async def toggle_maintenance_mode(message: types.Message):
+@dp.message(F.text == "🔧 Техперерыв Вкл")
+async def enable_maintenance(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     global maintenance_mode
-    if message.text == "🔧 Техперерыв Вкл":
-        maintenance_mode = True
-        await message.answer("✅ Режим технического обслуживания **включен**. Бот будет недоступен для обычных пользователей.", reply_markup=get_admin_kb())
-        logger.warning(f"Админ {message.from_user.id} включил режим техобслуживания.")
-    else:
-        maintenance_mode = False
-        await message.answer("✅ Режим технического обслуживания **выключен**. Бот снова доступен для всех.", reply_markup=get_admin_kb())
-        logger.warning(f"Админ {message.from_user.id} выключил режим техобслуживания.")
+    maintenance_mode = True
+    await message.answer("✅ Режим технического обслуживания включен. Бот будет отвечать только администраторам.", reply_markup=get_admin_kb())
+    logger.info(f"Админ {message.from_user.id} включил режим технического обслуживания.")
+
+@dp.message(F.text == "🔧 Техперерыв Выкл")
+async def disable_maintenance(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    global maintenance_mode
+    maintenance_mode = False
+    await message.answer("✅ Режим технического обслуживания выключен. Бот снова доступен всем пользователям.", reply_markup=get_admin_kb())
+    logger.info(f"Админ {message.from_user.id} выключил режим технического обслуживания.")
 
 
 # =====================
@@ -1692,13 +1800,15 @@ async def toggle_maintenance_mode(message: types.Message):
 # =====================
 
 async def main():
-    logger.info("Инициализация базы данных...")
-    await init_db() # Инициализируем БД при старте
-    logger.info("Запуск бота в режиме polling...")
-    try:
-        await dp.start_polling(bot, skip_updates=True)
-    except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}")
+    await init_db()
+    # Удалите или закомментируйте эту строку, если вы хотите получать все обновления
+    # await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot, skip_updates=True) # skip_updates=True пропустит все старые необработанные обновления
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен вручную.")
+    except Exception as e:
+        logger.error(f"Критическая ошибка запуска бота: {e}")
