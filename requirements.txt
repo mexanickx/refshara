@@ -1,7 +1,7 @@
 aiocryptopay==0.4.7
 asyncpg==0.29.0
 aiofiles==24.1.0
-aiogram==3.19.0
+aiogram==3.7.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.11.16
 aiohttp-jinja2==1.6
