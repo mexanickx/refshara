@@ -203,14 +203,16 @@ async def db_add_user(user_id: int, username: str, reg_date: str, balance: float
             user_id, username, reg_date, balance, last_mine_time
         )
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_get_user(user_id: int):
     conn = await get_db_connection()
     try:
         row = await conn.fetchrow("SELECT user_id, username, reg_date, balance, last_mine_time, referral_count FROM users WHERE user_id = $1", user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     if row:
         return {
             'user_id': row['user_id'],
@@ -227,28 +229,32 @@ async def db_update_user_balance(user_id: int, new_balance: float):
     try:
         await conn.execute("UPDATE users SET balance = $1 WHERE user_id = $2", new_balance, user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_update_user_last_mine_time(user_id: int, last_mine_time: str):
     conn = await get_db_connection()
     try:
         await conn.execute("UPDATE users SET last_mine_time = $1 WHERE user_id = $2", last_mine_time, user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_update_username(user_id: int, username: str):
     conn = await get_db_connection()
     try:
         await conn.execute("UPDATE users SET username = $1 WHERE user_id = $2", username, user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_update_referral_count(user_id: int, new_count: int):
     conn = await get_db_connection()
     try:
         await conn.execute("UPDATE users SET referral_count = $1 WHERE user_id = $2", new_count, user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 # --- CRUD операции для рефералов ---
 async def db_add_referral(referrer_id: int, referred_user_id: int):
@@ -261,7 +267,8 @@ async def db_add_referral(referrer_id: int, referred_user_id: int):
         # Увеличиваем referral_count у реферера
         await conn.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = $1", referrer_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_get_referrals_count(user_id: int):
     conn = await get_db_connection()
@@ -269,7 +276,8 @@ async def db_get_referrals_count(user_id: int):
         # Теперь получаем из столбца referral_count
         count = await conn.fetchval("SELECT referral_count FROM users WHERE user_id = $1", user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return count if count is not None else 0
 
 async def db_get_all_users_with_referral_count():
@@ -281,7 +289,8 @@ async def db_get_all_users_with_referral_count():
             ORDER BY referral_count DESC
         ''')
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return [(r['user_id'], r['username'], r['referral_count']) for r in rows]
 
 # --- CRUD операции для заданий ---
@@ -293,14 +302,16 @@ async def db_add_task(task_num: int, text: str, photo_file_id: str = None):
             task_num, text, photo_file_id
         )
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_get_task(task_num: int):
     conn = await get_db_connection()
     try:
         row = await conn.fetchrow("SELECT task_num, task_text, task_photo_file_id FROM tasks WHERE task_num = $1", task_num)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     if row:
         return {'task_num': row['task_num'], 'text': row['task_text'], 'photo': row['task_photo_file_id']}
     return None
@@ -310,7 +321,8 @@ async def db_get_all_tasks():
     try:
         rows = await conn.fetch("SELECT task_num, task_text, task_photo_file_id FROM tasks ORDER BY task_num")
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return [{'task_num': r['task_num'], 'text': r['task_text'], 'photo': r['task_photo_file_id']} for r in rows]
 
 async def db_delete_task(task_num: int):
@@ -318,7 +330,8 @@ async def db_delete_task(task_num: int):
     try:
         await conn.execute("DELETE FROM tasks WHERE task_num = $1", task_num)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 # --- CRUD операции для выполненных заданий ---
 async def db_add_task_proof(user_id: int, task_num: int, proof_photo_file_id: str, completion_date: str):
@@ -329,23 +342,26 @@ async def db_add_task_proof(user_id: int, task_num: int, proof_photo_file_id: st
             user_id, task_num, proof_photo_file_id, completion_date
         )
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_get_user_completed_tasks(user_id: int):
     conn = await get_db_connection()
     try:
         rows = await conn.fetch("SELECT task_num, completion_date FROM task_proofs WHERE user_id = $1", user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return {r['task_num']: r['completion_date'] for r in rows} # {task_num: completion_date}
 
 async def db_get_all_completed_tasks_raw():
     conn = await get_db_connection()
     try:
         # Получаем user_id и task_num
-        rows = await conn.fetch("SELECT user_id, task_num FROM task_proofs")
+        rows = await conn.fetch("SELECT user_id, task_num, completion_date FROM task_proofs")
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return rows # Возвращает список Row-объектов
 
 async def db_get_total_completed_tasks_count():
@@ -353,7 +369,8 @@ async def db_get_total_completed_tasks_count():
     try:
         count = await conn.fetchval("SELECT COUNT(*) FROM task_proofs")
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return count if count is not None else 0
 
 # --- CRUD операции для заблокированных пользователей ---
@@ -362,21 +379,24 @@ async def db_block_user(user_id: int):
     try:
         await conn.execute("INSERT INTO blocked_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_unblock_user(user_id: int):
     conn = await get_db_connection()
     try:
         await conn.execute("DELETE FROM blocked_users WHERE user_id = $1", user_id)
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
 
 async def db_is_user_blocked(user_id: int):
     conn = await get_db_connection()
     try:
         is_blocked = await conn.fetchval("SELECT 1 FROM blocked_users WHERE user_id = $1", user_id) is not None
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return is_blocked
 
 async def db_get_all_blocked_users():
@@ -384,7 +404,8 @@ async def db_get_all_blocked_users():
     try:
         rows = await conn.fetch("SELECT user_id FROM blocked_users")
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return {r['user_id'] for r in rows}
 
 # --- Общие данные для статистики/рассылки ---
@@ -393,7 +414,8 @@ async def db_get_all_user_ids():
     try:
         rows = await conn.fetch("SELECT user_id FROM users")
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return [r['user_id'] for r in rows]
 
 async def db_get_total_balance():
@@ -401,7 +423,8 @@ async def db_get_total_balance():
     try:
         total_balance = await conn.fetchval("SELECT SUM(balance) FROM users")
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     return float(total_balance) if total_balance is not None else 0.0
 
 async def db_get_users_for_export():
@@ -413,16 +436,19 @@ async def db_get_users_for_export():
                 u.username,
                 u.reg_date,
                 u.balance,
-                u.referral_count, -- Теперь берем напрямую из users
+                u.referral_count,
+                -- Агрегируем номера выполненных заданий
                 STRING_AGG(DISTINCT tp.task_num::text, ',' ORDER BY tp.task_num) AS completed_task_nums,
-                STRING_AGG(DISTINCT tp.completion_date, ',' ORDER BY tp.task_num) AS completed_task_dates
+                -- Агрегируем даты выполнения, соответствуя порядку task_num
+                STRING_AGG(tp.completion_date, ',' ORDER BY tp.task_num) AS completed_task_dates
             FROM users u
             LEFT JOIN task_proofs tp ON u.user_id = tp.user_id
             GROUP BY u.user_id, u.username, u.reg_date, u.balance, u.referral_count
             ORDER BY u.user_id
         ''')
     finally:
-        await conn.close()
+        if conn:
+            await conn.close()
     # asyncpg возвращает Row-объекты, которые можно преобразовать в кортежи или словари
     return [tuple(row.values()) for row in rows]
 
@@ -782,7 +808,8 @@ async def cmd_start(message: types.Message, command: CommandObject = None, **kwa
                 # Проверяем, что текущий пользователь уже не был чьим-то рефералом
                 conn = await get_db_connection()
                 existing_referral = await conn.fetchrow("SELECT 1 FROM referrals WHERE referred_user_id = $1", user_id)
-                await conn.close()
+                if conn:
+                    await conn.close()
 
                 if not existing_referral:
                     await db_add_referral(referrer_id, user_id) # Эта функция теперь обновляет referral_count
@@ -849,7 +876,7 @@ async def profile_handler(message: types.Message, **kwargs):
 
 @dp.callback_query(F.data == "deposit_funds")
 @check_not_blocked
-async def deposit_funds_handler(callback: types.CallbackQuery, state: FSMContext):
+async def deposit_funds_handler(callback: types.CallbackQuery, state: FSMContext, **kwargs):
     if not CRYPTO_BOT_TOKEN:
         await callback.answer("❌ Функции пополнения временно недоступны. Обратитесь к администратору.", show_alert=True)
         return
@@ -869,7 +896,7 @@ async def deposit_funds_handler(callback: types.CallbackQuery, state: FSMContext
 
 @dp.message(DepositState.waiting_for_amount, F.text == "🔙 Отмена")
 @check_not_blocked
-async def cancel_deposit(message: types.Message, state: FSMContext):
+async def cancel_deposit(message: types.Message, state: FSMContext, **kwargs):
     await message.answer(
         "❌ Пополнение баланса отменено.",
         reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
@@ -878,7 +905,7 @@ async def cancel_deposit(message: types.Message, state: FSMContext):
 
 @dp.message(DepositState.waiting_for_amount)
 @check_not_blocked
-async def process_deposit_amount(message: types.Message, state: FSMContext):
+async def process_deposit_amount(message: types.Message, state: FSMContext, **kwargs):
     if not CRYPTO_BOT_TOKEN:
         await message.answer("❌ Функции пополнения временно недоступны. Обратитесь к администратору.")
         await state.clear()
@@ -924,7 +951,7 @@ async def process_deposit_amount(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "withdraw_funds")
 @check_not_blocked
-async def withdraw_funds_handler(callback: types.CallbackQuery, state: FSMContext):
+async def withdraw_funds_handler(callback: types.CallbackQuery, state: FSMContext, **kwargs):
     if not CRYPTO_BOT_TOKEN:
         await callback.answer("❌ Функции вывода временно недоступны. Обратитесь к администратору.", show_alert=True)
         return
@@ -965,7 +992,7 @@ async def withdraw_funds_handler(callback: types.CallbackQuery, state: FSMContex
 
 @dp.message(WithdrawState.waiting_for_amount, F.text == "🔙 Отмена")
 @check_not_blocked
-async def cancel_withdrawal(message: types.Message, state: FSMContext):
+async def cancel_withdrawal(message: types.Message, state: FSMContext, **kwargs):
     await message.answer(
         "❌ Вывод средств отменен.",
         reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
@@ -974,7 +1001,7 @@ async def cancel_withdrawal(message: types.Message, state: FSMContext):
 
 @dp.message(WithdrawState.waiting_for_amount)
 @check_not_blocked
-async def process_withdrawal_amount(message: types.Message, state: FSMContext):
+async def process_withdrawal_amount(message: types.Message, state: FSMContext, **kwargs):
     if not CRYPTO_BOT_TOKEN:
         await message.answer("❌ Функции вывода временно недоступны. Обратитесь к администратору.")
         await state.clear()
@@ -1251,7 +1278,8 @@ async def get_top_completed_tasks_all_time():
             for row in rows:
                 all_users_data[row['user_id']] = {'username': row['username']}
         finally:
-            await conn.close()
+            if conn:
+                await conn.close()
 
 
     for user_id, count in user_task_counts.items():
@@ -1554,7 +1582,7 @@ async def start_delete_task(message: types.Message, state: FSMContext):
     await state.set_state(DeleteTaskState.waiting_for_task_number)
 
 @dp.message(DeleteTaskState.waiting_for_task_number)
-async def process_delete_task_number(message: types.Saga, state: FSMContext): # Исправлен опечатка Saga на Message
+async def process_delete_task_number(message: types.Message, state: FSMContext): # Исправлено: types.Saga на types.Message
     if message.from_user.id not in ADMIN_IDS:
         return
     try:
