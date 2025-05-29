@@ -164,6 +164,7 @@ async def init_db():
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
+            # 1. Создаем таблицу users (на нее ссылаются другие)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -183,15 +184,7 @@ async def init_db():
                     usdt_balance REAL DEFAULT 0.0
                 );
             ''')
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS mining_upgrades (
-                    user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-                    level INTEGER DEFAULT 1,
-                    price REAL DEFAULT 0.0,
-                    income REAL DEFAULT 0.001,
-                    last_upgrade_time TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-            ''')
+            # 2. Создаем таблицу tasks (на нее ссылаются completed_tasks и task_proofs)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id SERIAL PRIMARY KEY,
@@ -201,6 +194,7 @@ async def init_db():
                     status TEXT DEFAULT 'active'
                 );
             ''')
+            # 3. Создаем таблицу completed_tasks (ссылается на users и tasks)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS completed_tasks (
                     id SERIAL PRIMARY KEY,
@@ -210,6 +204,7 @@ async def init_db():
                     UNIQUE (user_id, task_id)
                 );
             ''')
+            # 4. Создаем таблицу task_proofs (ссылается на users и tasks)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS task_proofs (
                     proof_id SERIAL PRIMARY KEY,
@@ -221,6 +216,17 @@ async def init_db():
                     status TEXT DEFAULT 'pending'
                 );
             ''')
+            # 5. Создаем таблицу mining_upgrades (ссылается на users)
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS mining_upgrades (
+                    user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                    level INTEGER DEFAULT 1,
+                    price REAL DEFAULT 0.0,
+                    income REAL DEFAULT 0.001,
+                    last_upgrade_time TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+            ''')
+            # 6. Создаем таблицу withdrawals (ссылается на users)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS withdrawals (
                     withdrawal_id SERIAL PRIMARY KEY,
@@ -631,7 +637,7 @@ def get_tasks_kb():
         keyboard=[
             [KeyboardButton(text="➡️ Выполнить задание"), KeyboardButton(text="Мои выполненные задания")],
             [KeyboardButton(text="🏆 Топ заданий")],
-            [KeyboardButton(text="⬅️ Назад")]
+            [KeyboardButton(text:"⬅️ Назад")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
