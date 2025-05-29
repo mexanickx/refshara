@@ -40,42 +40,76 @@ logger = logging.getLogger(__name__)
 API_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен в переменных окружения. Бот не сможет запуститься.")
-    exit(1) # Завершаем выполнение, если токен не найден
+    exit(1) # Завершаем программу, если токен не установлен
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    logger.error("DATABASE_URL не установлен в переменных окружения. База данных недоступна.")
+    exit(1)
 
 ADMIN_IDS_STR = os.environ.get("ADMIN_IDS")
-ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',')] if ADMIN_IDS_STR else []
+# Улучшенный парсинг ADMIN_IDS: фильтруем пустые строки
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()] if ADMIN_IDS_STR else []
 if not ADMIN_IDS:
-    logger.warning("ADMIN_IDS не установлены в переменных окружения. Админ-функции будут недоступны.")
+    logger.warning("ADMIN_IDS не установлены или пусты. Некоторые функции администрирования могут быть недоступны.")
 
 CRYPTO_BOT_TOKEN = os.environ.get("CRYPTO_BOT_API_TOKEN")
 if not CRYPTO_BOT_TOKEN:
-    logger.warning("CRYPTO_BOT_API_TOKEN не установлен. Функции вывода/пополнения не будут работать.")
+    logger.warning("CRYPTO_BOT_API_TOKEN не установлен. Функции пополнения/вывода через Crypto Bot будут отключены.")
 
-CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
 
-# Константы майнинга
-MINING_COOLDOWN = 3600  # 1 час в секундах
-MINING_REWARD_RANGE = (3, 3)  # Диапазон награды
-TASK_REWARD_RANGE = (5, 10)  # Награда за задание
-REFERRAL_REWARD = 3  # Награда за приглашенного реферала
-MIN_WITHDRAWAL = 0.05  # Минимальная сумма вывода в USDT
-ZB_EXCHANGE_RATE = 0.01  # Курс 1 Zebranium = 0.01 USDT
-
-# Настройки базы данных PostgreSQL (Чтение из переменных окружения)
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    logger.error("DATABASE_URL не установлен в переменных окружения. База данных не будет работать.")
-    exit(1) # Завершаем выполнение, если URL базы данных не найден
-
-# Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN)
+# --- ИНИЦИАЛИЗАЦИЯ БОТА И ДИСПЕТЧЕРА ---
+bot = Bot(API_TOKEN, parse_mode='HTML') # Используем HTML для форматирования
 dp = Dispatcher(storage=MemoryStorage())
 
-# Временные хранилища в памяти
-pending_approvals = {}
-maintenance_mode = False # Глобальный флаг режима техобслуживания
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ И НАСТРОЙКИ ---
+maintenance_mode = False # Режим технического обслуживания
+min_withdrawal_amount_btc = 0.0001
+min_withdrawal_amount_usdt = 5.0 # Минимальная сумма вывода USDT
+min_withdrawal_amount_trc20 = 5.0 # Минимальная сумма вывода TRC20 (если TRC20 не USDT)
 
-# Запускаем фейковый HTTP-сервер, чтобы Render не завершал процесс
+# --- СОСТОЯНИЯ FSM (Finite State Machine) ---
+class Form(StatesGroup):
+    task_id = State()
+    proof_text = State()
+    proof_photo = State()
+    withdrawal_amount = State()
+    withdrawal_address = State()
+    withdrawal_currency = State()
+    admin_send_message = State()
+    admin_send_photo = State()
+    admin_send_text = State()
+    waiting_for_task_name = State()
+    waiting_for_task_description = State()
+    waiting_for_task_reward = State()
+    waiting_for_delete_task_number = State()
+    waiting_for_task_id_for_approve = State()
+    waiting_for_proof_photo_for_approve = State()
+
+
+class WithdrawState(StatesGroup):
+    waiting_for_amount = State()
+    waiting_for_address = State()
+    waiting_for_currency = State()
+
+class AdminAddTaskState(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_description = State()
+    waiting_for_reward = State()
+
+class DeleteTaskState(StatesGroup):
+    waiting_for_task_number = State()
+
+class ApproveTaskState(StatesGroup):
+    waiting_for_proof_id = State()
+    waiting_for_admin_decision = State()
+
+class AdminBroadcastState(StatesGroup):
+    waiting_for_message = State()
+
+
+# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER.COM ---
+# запускаем фейковый сервер, чтобы Render не ругался
 def run_fake_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -83,1728 +117,1212 @@ def run_fake_server():
             self.end_headers()
             self.wfile.write(b'Bot is running!')
 
-    port = int(os.environ.get("PORT", 10000)) # Используем порт из переменной окружения
-    try:
-        server = HTTPServer(('0.0.0.0', port), Handler)
-        logger.info(f"Fake web server running on 0.0.0.0:{port}")
-        server.serve_forever()
-    except Exception as e:
-        logger.error(f"Failed to start fake web server: {e}")
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    logger.info(f"Fake web server running on 0.0.0.0:{port}")
+    server.serve_forever()
 
-# Запускаем фейковый сервер в отдельном потоке
-threading.Thread(target=run_fake_server, daemon=True).start()
-
-
-# Классы состояний
-class TaskStates(StatesGroup):
-    waiting_for_proof = State()
-
-class BroadcastState(StatesGroup):
-    waiting_for_message = State()
-
-class BlockState(StatesGroup):
-    waiting_for_id = State()
-
-class UnblockState(StatesGroup):
-    waiting_for_id = State()
-
-class AddTaskState(StatesGroup):
-    waiting_for_task_number = State()
-    waiting_for_task_text = State()
-    waiting_for_task_photo = State()
-
-class DeleteTaskState(StatesGroup):
-    waiting_for_task_number = State()
-
-class TopStates(StatesGroup):
-    waiting_top_type = State()
-
-class EditUserState(StatesGroup):
-    waiting_for_id = State()
-    waiting_for_field = State()
-    waiting_for_value = State()
-    waiting_for_task_num_to_assign = State() # Новое состояние для выдачи задания
-
-class WithdrawState(StatesGroup):
-    waiting_for_amount = State()
-
-class DepositState(StatesGroup):
-    waiting_for_amount = State()
+# Запуск фейкового сервера в отдельном потоке
+# Это важно, чтобы основной поток оставался свободным для работы бота
+server_thread = threading.Thread(target=run_fake_server)
+server_thread.daemon = True # Позволяет потоку завершиться при завершении основной программы
+server_thread.start()
 
 
-# =====================
-# ФУНКЦИИ БАЗЫ ДАННЫХ PostgreSQL
-# =====================
-
-async def get_db_connection():
-    """Получает асинхронное подключение к базе данных PostgreSQL."""
-    return await asyncpg.connect(DATABASE_URL)
-
-async def init_db():
-    """Инициализирует таблицы базы данных, если они не существуют."""
-    conn = None
-    try:
-        conn = await get_db_connection()
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username VARCHAR(255),
-                reg_date VARCHAR(255),
-                balance DECIMAL(10, 2),
-                last_mine_time VARCHAR(255),
-                referral_count INTEGER DEFAULT 0 -- Изменено: теперь хранит число
-            );
-        ''')
-        # Таблица referrals по-прежнему нужна для отслеживания связей
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS referrals (
-                referrer_id BIGINT,
-                referred_user_id BIGINT PRIMARY KEY,
-                FOREIGN KEY (referrer_id) REFERENCES users(user_id) ON DELETE CASCADE
-            );
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_num INT PRIMARY KEY,
-                task_text TEXT,
-                task_photo_file_id VARCHAR(255)
-            );
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS task_proofs (
-                user_id BIGINT,
-                task_num INT,
-                proof_photo_file_id VARCHAR(255),
-                completion_date VARCHAR(255),
-                PRIMARY KEY (user_id, task_num),
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-                FOREIGN KEY (task_num) REFERENCES tasks(task_num) ON DELETE CASCADE
-            );
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS blocked_users (
-                user_id BIGINT PRIMARY KEY
-            );
-        ''')
-        logger.info("База данных PostgreSQL инициализирована.")
-    except Exception as e:
-        logger.error(f"Ошибка при инициализации базы данных: {e}")
-    finally:
-        if conn:
-            await conn.close()
-
-
-# --- CRUD операции для пользователей ---
-async def db_add_user(user_id: int, username: str, reg_date: str, balance: float, last_mine_time: str = None):
-    conn = await get_db_connection()
-    try:
-        await conn.execute(
-            "INSERT INTO users (user_id, username, reg_date, balance, last_mine_time, referral_count) VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT (user_id) DO NOTHING",
-            user_id, username, reg_date, balance, last_mine_time
-        )
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_get_user(user_id: int):
-    conn = await get_db_connection()
-    try:
-        row = await conn.fetchrow("SELECT user_id, username, reg_date, balance, last_mine_time, referral_count FROM users WHERE user_id = $1", user_id)
-    finally:
-        if conn:
-            await conn.close()
-    if row:
-        return {
-            'user_id': row['user_id'],
-            'username': row['username'],
-            'reg_date': row['reg_date'],
-            'balance': float(row['balance']), # Преобразуем Decimal в float
-            'last_mine_time': row['last_mine_time'],
-            'referral_count': row['referral_count'] # Добавлено
-        }
-    return None
-
-async def db_update_user_balance(user_id: int, new_balance: float):
-    conn = await get_db_connection()
-    try:
-        await conn.execute("UPDATE users SET balance = $1 WHERE user_id = $2", new_balance, user_id)
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_update_user_last_mine_time(user_id: int, last_mine_time: str):
-    conn = await get_db_connection()
-    try:
-        await conn.execute("UPDATE users SET last_mine_time = $1 WHERE user_id = $2", last_mine_time, user_id)
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_update_username(user_id: int, username: str):
-    conn = await get_db_connection()
-    try:
-        await conn.execute("UPDATE users SET username = $1 WHERE user_id = $2", username, user_id)
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_update_referral_count(user_id: int, new_count: int):
-    conn = await get_db_connection()
-    try:
-        await conn.execute("UPDATE users SET referral_count = $1 WHERE user_id = $2", new_count, user_id)
-    finally:
-        if conn:
-            await conn.close()
-
-# --- CRUD операции для рефералов ---
-async def db_add_referral(referrer_id: int, referred_user_id: int):
-    conn = await get_db_connection()
-    try:
-        await conn.execute(
-            "INSERT INTO referrals (referrer_id, referred_user_id) VALUES ($1, $2) ON CONFLICT (referred_user_id) DO NOTHING",
-            referrer_id, referred_user_id
-        )
-        # Увеличиваем referral_count у реферера
-        await conn.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = $1", referrer_id)
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_get_referrals_count(user_id: int):
-    conn = await get_db_connection()
-    try:
-        # Теперь получаем из столбца referral_count
-        count = await conn.fetchval("SELECT referral_count FROM users WHERE user_id = $1", user_id)
-    finally:
-        if conn:
-            await conn.close()
-    return count if count is not None else 0
-
-async def db_get_all_users_with_referral_count():
-    conn = await get_db_connection()
-    try:
-        rows = await conn.fetch('''
-            SELECT user_id, username, referral_count
-            FROM users
-            ORDER BY referral_count DESC
-        ''')
-    finally:
-        if conn:
-            await conn.close()
-    return [(r['user_id'], r['username'], r['referral_count']) for r in rows]
-
-# --- CRUD операции для заданий ---
-async def db_add_task(task_num: int, text: str, photo_file_id: str = None):
-    conn = await get_db_connection()
-    try:
-        await conn.execute(
-            "INSERT INTO tasks (task_num, task_text, task_photo_file_id) VALUES ($1, $2, $3) ON CONFLICT (task_num) DO UPDATE SET task_text=$2, task_photo_file_id=$3",
-            task_num, text, photo_file_id
-        )
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_get_task(task_num: int):
-    conn = await get_db_connection()
-    try:
-        row = await conn.fetchrow("SELECT task_num, task_text, task_photo_file_id FROM tasks WHERE task_num = $1", task_num)
-    finally:
-        if conn:
-            await conn.close()
-    if row:
-        return {'task_num': row['task_num'], 'text': row['task_text'], 'photo': row['task_photo_file_id']}
-    return None
-
-async def db_get_all_tasks():
-    conn = await get_db_connection()
-    try:
-        rows = await conn.fetch("SELECT task_num, task_text, task_photo_file_id FROM tasks ORDER BY task_num")
-    finally:
-        if conn:
-            await conn.close()
-    return [{'task_num': r['task_num'], 'text': r['task_text'], 'photo': r['task_photo_file_id']} for r in rows]
-
-async def db_delete_task(task_num: int):
-    conn = await get_db_connection()
-    try:
-        await conn.execute("DELETE FROM tasks WHERE task_num = $1", task_num)
-    finally:
-        if conn:
-            await conn.close()
-
-# --- CRUD операции для выполненных заданий ---
-async def db_add_task_proof(user_id: int, task_num: int, proof_photo_file_id: str, completion_date: str):
-    conn = await get_db_connection()
-    try:
-        await conn.execute(
-            "INSERT INTO task_proofs (user_id, task_num, proof_photo_file_id, completion_date) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, task_num) DO UPDATE SET proof_photo_file_id=$3, completion_date=$4",
-            user_id, task_num, proof_photo_file_id, completion_date
-        )
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_get_user_completed_tasks(user_id: int):
-    conn = await get_db_connection()
-    try:
-        rows = await conn.fetch("SELECT task_num, completion_date FROM task_proofs WHERE user_id = $1", user_id)
-    finally:
-        if conn:
-            await conn.close()
-    return {r['task_num']: r['completion_date'] for r in rows} # {task_num: completion_date}
-
-async def db_get_all_completed_tasks_raw():
-    conn = await get_db_connection()
-    try:
-        # Получаем user_id и task_num
-        rows = await conn.fetch("SELECT user_id, task_num, completion_date FROM task_proofs")
-    finally:
-        if conn:
-            await conn.close()
-    return rows # Возвращает список Row-объектов
-
-async def db_get_total_completed_tasks_count():
-    conn = await get_db_connection()
-    try:
-        count = await conn.fetchval("SELECT COUNT(*) FROM task_proofs")
-    finally:
-        if conn:
-            await conn.close()
-    return count if count is not None else 0
-
-# --- CRUD операции для заблокированных пользователей ---
-async def db_block_user(user_id: int):
-    conn = await get_db_connection()
-    try:
-        await conn.execute("INSERT INTO blocked_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_unblock_user(user_id: int):
-    conn = await get_db_connection()
-    try:
-        await conn.execute("DELETE FROM blocked_users WHERE user_id = $1", user_id)
-    finally:
-        if conn:
-            await conn.close()
-
-async def db_is_user_blocked(user_id: int):
-    conn = await get_db_connection()
-    try:
-        is_blocked = await conn.fetchval("SELECT 1 FROM blocked_users WHERE user_id = $1", user_id) is not None
-    finally:
-        if conn:
-            await conn.close()
-    return is_blocked
-
-async def db_get_all_blocked_users():
-    conn = await get_db_connection()
-    try:
-        rows = await conn.fetch("SELECT user_id FROM blocked_users")
-    finally:
-        if conn:
-            await conn.close()
-    return {r['user_id'] for r in rows}
-
-# --- Общие данные для статистики/рассылки ---
-async def db_get_all_user_ids():
-    conn = await get_db_connection()
-    try:
-        rows = await conn.fetch("SELECT user_id FROM users")
-    finally:
-        if conn:
-            await conn.close()
-    return [r['user_id'] for r in rows]
-
-async def db_get_total_balance():
-    conn = await get_db_connection()
-    try:
-        total_balance = await conn.fetchval("SELECT SUM(balance) FROM users")
-    finally:
-        if conn:
-            await conn.close()
-    return float(total_balance) if total_balance is not None else 0.0
-
-async def db_get_users_for_export():
-    conn = await get_db_connection()
-    try:
-        rows = await conn.fetch('''
-            SELECT
-                u.user_id,
-                u.username,
-                u.reg_date,
-                u.balance,
-                u.referral_count,
-                -- Агрегируем номера выполненных заданий
-                STRING_AGG(DISTINCT tp.task_num::text, ',' ORDER BY tp.task_num) AS completed_task_nums,
-                -- Агрегируем даты выполнения, соответствуя порядку task_num
-                STRING_AGG(tp.completion_date, ',' ORDER BY tp.task_num) AS completed_task_dates
-            FROM users u
-            LEFT JOIN task_proofs tp ON u.user_id = tp.user_id
-            GROUP BY u.user_id, u.username, u.reg_date, u.balance, u.referral_count
-            ORDER BY u.user_id
-        ''')
-    finally:
-        if conn:
-            await conn.close()
-    # asyncpg возвращает Row-объекты, которые можно преобразовать в кортежи или словари
-    return [tuple(row.values()) for row in rows]
-
-
-# =====================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# =====================
-
-# Декоратор для проверки блокировки и режима техобслуживания
-def check_not_blocked(func):
-    async def wrapper(message: types.Message, **kwargs):
-        if await db_is_user_blocked(message.from_user.id):
-            await message.answer("⛔ Вы заблокированы.")
-            return
-
+# --- ДЕКОРАТОР ДЛЯ ОБРАБОТКИ ОШИБОК И РЕЖИМА ТЕХ. ОБСЛУЖИВАНИЯ ---
+def error_handler_decorator(func):
+    async def wrapper(message: types.Message, *args, **kwargs):
         if maintenance_mode and message.from_user.id not in ADMIN_IDS:
-            await message.answer("🔧 Бот находится на техническом обслуживании. Пожалуйста, попробуйте позже.")
+            await message.answer("🛠️ Бот находится на техническом обслуживании. Пожалуйста, попробуйте позже.")
             return
 
-        return await func(message, **kwargs)
+        try:
+            return await func(message, *args, **kwargs)
+        except TelegramForbiddenError:
+            logger.error(f"Бот заблокирован пользователем {message.from_user.id}.")
+            # Здесь можно добавить логику для удаления пользователя из БД или отметки его как неактивного
+        except Exception as e:
+            logger.error(f"Произошла ошибка в обработчике {func.__name__}: {e}", exc_info=True)
+            if message.from_user.id in ADMIN_IDS:
+                await message.answer(f"⚠️ Произошла ошибка: {e}\n\nПожалуйста, проверьте логи.")
+            else:
+                await message.answer("⚠️ Произошла непредвиденная ошибка. Пожалуйста, попробуйте еще раз позже.")
     return wrapper
 
-# Функции для клавиатур
-def get_main_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    kb = [
-        [KeyboardButton(text="👀Профиль")],
-        [KeyboardButton(text="👥Рефералы"), KeyboardButton(text="💼Задания")],
-        [KeyboardButton(text="⛏️Майнинг"), KeyboardButton(text="📈Топы")],
-        [KeyboardButton(text="✉️Помощь")]
-    ]
-    if is_admin:
-        kb.append([KeyboardButton(text="👑Админка")])
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+# --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
+async def get_db_pool():
+    if not hasattr(get_db_pool, 'pool'):
+        get_db_pool.pool = await asyncpg.create_pool(DATABASE_URL)
+    return get_db_pool.pool
 
-def get_admin_kb() -> ReplyKeyboardMarkup:
-    global maintenance_mode # Используем глобальную переменную
+async def init_db():
+    conn = None
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    reg_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    balance REAL DEFAULT 0.0,
+                    last_mine_time TIMESTAMP WITH TIME ZONE,
+                    referral_count INTEGER DEFAULT 0, -- Убедитесь, что этот столбец есть!
+                    referrer_id BIGINT,
+                    invited_users TEXT DEFAULT '[]',
+                    mining_level INTEGER DEFAULT 1,
+                    mining_income REAL DEFAULT 0.001,
+                    last_bonus_time TIMESTAMP WITH TIME ZONE,
+                    invited_by_link TEXT,
+                    btc_address TEXT,
+                    trc20_address TEXT,
+                    usdt_balance REAL DEFAULT 0.0
+                );
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS mining_upgrades (
+                    user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                    level INTEGER DEFAULT 1,
+                    price REAL DEFAULT 0.0,
+                    income REAL DEFAULT 0.001,
+                    last_upgrade_time TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id SERIAL PRIMARY KEY,
+                    task_name TEXT NOT NULL,
+                    task_description TEXT NOT NULL,
+                    reward REAL NOT NULL,
+                    status TEXT DEFAULT 'active'
+                );
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS completed_tasks (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    task_id INTEGER NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                    completion_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    UNIQUE (user_id, task_id)
+                );
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS task_proofs (
+                    proof_id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    task_id INTEGER NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                    proof_text TEXT,
+                    proof_photo_id TEXT,
+                    submission_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    status TEXT DEFAULT 'pending'
+                );
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS withdrawals (
+                    withdrawal_id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    amount REAL NOT NULL,
+                    currency TEXT NOT NULL, -- BTC, USDT, TRC20
+                    address TEXT NOT NULL,
+                    request_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    status TEXT DEFAULT 'pending' -- pending, approved, rejected
+                );
+            ''')
+            logger.info("База данных и таблицы инициализированы/проверены.")
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации базы данных: {e}", exc_info=True)
+        exit(1)
+
+async def db_add_user(user_id: int, username: str, referrer_id: int = None, invited_by_link: str = None):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO users(user_id, username, reg_date, balance, last_mine_time, referrer_id, invited_by_link)
+            VALUES($1, $2, NOW(), 0.0, NULL, $3, $4)
+            ON CONFLICT (user_id) DO NOTHING
+        ''', user_id, username, referrer_id, invited_by_link)
+        logger.info(f"Добавлен или обновлен пользователь: {user_id}, username: {username}, referrer: {referrer_id}")
+
+        if referrer_id:
+            # Для надежности, убедитесь, что referrer_id существует
+            referrer_exists = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", referrer_id)
+            if referrer_exists:
+                await conn.execute('''
+                    UPDATE users
+                    SET referral_count = referral_count + 1,
+                        invited_users = invited_users || $1::jsonb
+                    WHERE user_id = $2
+                ''', f'[{user_id}]', referrer_id)
+                logger.info(f"Увеличено referral_count для реферера {referrer_id}.")
+            else:
+                logger.warning(f"Реферер {referrer_id} не найден в базе данных.")
+
+
+async def db_get_user(user_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Добавлен referral_count в SELECT запрос
+        row = await conn.fetchrow("SELECT user_id, username, reg_date, balance, last_mine_time, referral_count, referrer_id, invited_users, mining_level, mining_income, last_bonus_time, invited_by_link, btc_address, trc20_address, usdt_balance FROM users WHERE user_id = $1", user_id)
+        if row:
+            # Преобразуем row в словарь для удобства доступа
+            user_data = dict(row)
+            # Обработка last_mine_time для обратной совместимости (если еще есть старые записи)
+            if 'last_mine_time' in user_data and isinstance(user_data['last_mine_time'], str):
+                try:
+                    user_data['last_mine_time'] = datetime.strptime(user_data['last_mine_time'], '%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc)
+                except ValueError:
+                    user_data['last_mine_time'] = datetime.strptime(user_data['last_mine_time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            # Обработка last_bonus_time
+            if 'last_bonus_time' in user_data and isinstance(user_data['last_bonus_time'], str):
+                try:
+                    user_data['last_bonus_time'] = datetime.strptime(user_data['last_bonus_time'], '%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc)
+                except ValueError:
+                    user_data['last_bonus_time'] = datetime.strptime(user_data['last_bonus_time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            return user_data
+        return None
+
+async def db_update_user_balance(user_id: int, amount: float):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        new_balance = await conn.fetchval("UPDATE users SET balance = balance + $1 WHERE user_id = $2 RETURNING balance", amount, user_id)
+        logger.info(f"Баланс пользователя {user_id} обновлен на {amount}. Новый баланс: {new_balance}")
+        return new_balance
+
+async def db_update_user_last_mine_time(user_id: int, mine_time: datetime):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_mine_time = $1 WHERE user_id = $2", mine_time.astimezone(timezone.utc), user_id)
+        logger.info(f"Время последнего майнинга для пользователя {user_id} обновлено на {mine_time.isoformat()}")
+
+async def db_update_user_username(user_id: int, username: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET username = $1 WHERE user_id = $2", username, user_id)
+        logger.info(f"Имя пользователя {user_id} обновлено на {username}.")
+
+async def db_get_all_users_ids():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users")
+        return [row['user_id'] for row in rows]
+
+async def db_get_referrals_count(user_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Теперь получаем из `referral_count` в `users`
+        count = await conn.fetchval("SELECT referral_count FROM users WHERE user_id = $1", user_id)
+        return count if count is not None else 0
+
+async def db_get_user_mining_upgrade(user_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT level, income, price, last_upgrade_time FROM mining_upgrades WHERE user_id = $1", user_id)
+        if row:
+            upgrade_data = dict(row)
+            if 'last_upgrade_time' in upgrade_data and isinstance(upgrade_data['last_upgrade_time'], str):
+                try:
+                    upgrade_data['last_upgrade_time'] = datetime.strptime(upgrade_data['last_upgrade_time'], '%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc)
+                except ValueError:
+                    upgrade_data['last_upgrade_time'] = datetime.strptime(upgrade_data['last_upgrade_time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            return upgrade_data
+        return None
+
+async def db_update_user_mining_upgrade(user_id: int, level: int, income: float, price: float):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Используем INSERT ... ON CONFLICT UPDATE для удобства
+        await conn.execute('''
+            INSERT INTO mining_upgrades(user_id, level, income, price, last_upgrade_time)
+            VALUES($1, $2, $3, $4, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+            SET level = $2, income = $3, price = $4, last_upgrade_time = NOW()
+        ''', user_id, level, income, price)
+        logger.info(f"Уровень майнинга пользователя {user_id} обновлен до уровня {level}.")
+
+async def db_update_user_btc_address(user_id: int, address: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET btc_address = $1 WHERE user_id = $2", address, user_id)
+        logger.info(f"BTC адрес пользователя {user_id} обновлен: {address}")
+
+async def db_update_user_trc20_address(user_id: int, address: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET trc20_address = $1 WHERE user_id = $2", address, user_id)
+        logger.info(f"TRC20 адрес пользователя {user_id} обновлен: {address}")
+
+async def db_update_user_usdt_balance(user_id: int, amount: float):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        new_balance = await conn.fetchval("UPDATE users SET usdt_balance = usdt_balance + $1 WHERE user_id = $2 RETURNING usdt_balance", amount, user_id)
+        logger.info(f"USDT баланс пользователя {user_id} обновлен на {amount}. Новый баланс: {new_balance}")
+        return new_balance
+
+async def db_add_task(task_name: str, task_description: str, reward: float):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        task_id = await conn.fetchval('''
+            INSERT INTO tasks(task_name, task_description, reward)
+            VALUES($1, $2, $3)
+            RETURNING task_id
+        ''', task_name, task_description, reward)
+        logger.info(f"Добавлено новое задание: {task_name} с ID {task_id}")
+        return task_id
+
+async def db_get_active_tasks():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT task_id, task_name, task_description, reward FROM tasks WHERE status = 'active'")
+        return [dict(row) for row in rows]
+
+async def db_get_task(task_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT task_id, task_name, task_description, reward, status FROM tasks WHERE task_id = $1", task_id)
+        return dict(row) if row else None
+
+async def db_delete_task(task_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM tasks WHERE task_id = $1", task_id)
+        logger.info(f"Задание с ID {task_id} удалено.")
+
+async def db_set_task_status(task_id: int, status: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE tasks SET status = $1 WHERE task_id = $2", status, task_id)
+        logger.info(f"Статус задания {task_id} изменен на {status}.")
+
+async def db_add_completed_task(user_id: int, task_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute('''
+                INSERT INTO completed_tasks(user_id, task_id, completion_date)
+                VALUES($1, $2, NOW())
+            ''', user_id, task_id)
+            logger.info(f"Пользователь {user_id} отметил задание {task_id} как выполненное.")
+            return True
+        except asyncpg.exceptions.UniqueViolationError:
+            logger.warning(f"Пользователь {user_id} уже выполнил задание {task_id}.")
+            return False
+
+async def db_has_completed_task(user_id: int, task_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM completed_tasks WHERE user_id = $1 AND task_id = $2", user_id, task_id)
+        return count > 0
+
+async def db_get_user_completed_tasks(user_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT task_id, completion_date FROM completed_tasks WHERE user_id = $1")
+        return [dict(row) for row in rows]
+
+async def db_add_task_proof(user_id: int, task_id: int, proof_text: str = None, proof_photo_id: str = None):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        proof_id = await conn.fetchval('''
+            INSERT INTO task_proofs(user_id, task_id, proof_text, proof_photo_id, submission_date, status)
+            VALUES($1, $2, $3, $4, NOW(), 'pending')
+            RETURNING proof_id
+        ''', user_id, task_id, proof_text, proof_photo_id)
+        logger.info(f"Добавлено подтверждение для задания {task_id} от пользователя {user_id}. Proof ID: {proof_id}")
+        return proof_id
+
+async def db_get_pending_proofs():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT proof_id, user_id, task_id, proof_text, proof_photo_id, submission_date FROM task_proofs WHERE status = 'pending'")
+        return [dict(row) for row in rows]
+
+async def db_set_proof_status(proof_id: int, status: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE task_proofs SET status = $1 WHERE proof_id = $2", status, proof_id)
+        logger.info(f"Статус подтверждения {proof_id} изменен на {status}.")
+
+async def db_get_proof(proof_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT proof_id, user_id, task_id, proof_text, proof_photo_id, submission_date, status FROM task_proofs WHERE proof_id = $1", proof_id)
+        return dict(row) if row else None
+
+async def db_add_withdrawal_request(user_id: int, amount: float, currency: str, address: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        withdrawal_id = await conn.fetchval('''
+            INSERT INTO withdrawals(user_id, amount, currency, address, request_date, status)
+            VALUES($1, $2, $3, $4, NOW(), 'pending')
+            RETURNING withdrawal_id
+        ''', user_id, amount, currency, address)
+        logger.info(f"Запрос на вывод {amount} {currency} от пользователя {user_id} на адрес {address}. ID: {withdrawal_id}")
+        return withdrawal_id
+
+async def db_get_pending_withdrawals():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT withdrawal_id, user_id, amount, currency, address, request_date FROM withdrawals WHERE status = 'pending'")
+        return [dict(row) for row in rows]
+
+async def db_set_withdrawal_status(withdrawal_id: int, status: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE withdrawals SET status = $1 WHERE withdrawal_id = $2", status, withdrawal_id)
+        logger.info(f"Статус вывода {withdrawal_id} изменен на {status}.")
+
+async def db_get_total_completed_tasks_count(user_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM task_proofs WHERE user_id = $1 AND status = 'approved'", user_id)
+        return count if count is not None else 0
+
+async def db_get_all_users_data():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, username, reg_date, balance, last_mine_time, referral_count, referrer_id, invited_users, mining_level, mining_income, last_bonus_time, invited_by_link, btc_address, trc20_address, usdt_balance FROM users")
+        return [dict(row) for row in rows]
+
+async def db_get_all_tasks_data():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT task_id, task_name, task_description, reward, status FROM tasks")
+        return [dict(row) for row in rows]
+
+async def db_get_all_task_proofs_data():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT proof_id, user_id, task_id, proof_text, proof_photo_id, submission_date, status FROM task_proofs")
+        return [dict(row) for row in rows]
+
+async def db_get_all_withdrawals_data():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT withdrawal_id, user_id, amount, currency, address, request_date, status FROM withdrawals")
+        return [dict(row) for row in rows]
+
+async def db_update_user_bonus_time(user_id: int, bonus_time: datetime):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_bonus_time = $1 WHERE user_id = $2", bonus_time.astimezone(timezone.utc), user_id)
+        logger.info(f"Время последнего бонуса для пользователя {user_id} обновлено на {bonus_time.isoformat()}")
+
+# --- Вспомогательные функции для Crypto Bot API ---
+async def crypto_bot_create_invoice(asset: str, amount: float, user_id: int, description: str):
+    if not CRYPTO_BOT_TOKEN:
+        logger.error("CRYPTO_BOT_API_TOKEN не установлен, невозможно создать инвойс.")
+        return None
+
+    url = "https://pay.crypt.bot/api/createInvoice"
+    headers = {
+        "Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN
+    }
+    payload = {
+        "asset": asset,
+        "amount": str(amount),
+        "description": description,
+        "payload": str(user_id),
+        "allow_anonymous": True,
+        "allow_comments": True,
+        "expires_in": 3600 # 1 час
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status() # Вызывает исключение для HTTP ошибок
+        json_response = response.json()
+        logger.info(f"Crypto Bot API Response (createInvoice): {json_response}")
+        if json_response.get("ok"):
+            return json_response["result"]
+        else:
+            logger.error(f"Ошибка создания инвойса Crypto Bot: {json_response.get('error')}")
+            return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка запроса к Crypto Bot API (createInvoice): {e}")
+        return None
+
+async def crypto_bot_get_invoices(invoice_ids: list):
+    if not CRYPTO_BOT_TOKEN:
+        logger.error("CRYPTO_BOT_API_TOKEN не установлен, невозможно получить инвойсы.")
+        return []
+
+    url = "https://pay.crypt.bot/api/getInvoices"
+    headers = {
+        "Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN
+    }
+    params = {
+        "invoice_ids": ",".join(map(str, invoice_ids))
+    }
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        json_response = response.json()
+        logger.info(f"Crypto Bot API Response (getInvoices for {invoice_ids}): {json_response}")
+        if json_response.get("ok"):
+            return json_response["result"]["items"]
+        else:
+            logger.error(f"Ошибка получения инвойсов Crypto Bot: {json_response.get('error')}")
+            return []
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка запроса к Crypto Bot API (getInvoices): {e}")
+        return []
+
+async def crypto_bot_get_balance():
+    if not CRYPTO_BOT_TOKEN:
+        logger.error("CRYPTO_BOT_API_TOKEN не установлен, невозможно получить баланс.")
+        return None
+    url = "https://pay.crypt.bot/api/getBalance"
+    headers = {
+        "Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        json_response = response.json()
+        if json_response.get("ok"):
+            return {item['asset']: item['available'] for item in json_response['result']}
+        else:
+            logger.error(f"Ошибка получения баланса Crypto Bot: {json_response.get('error')}")
+            return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка запроса к Crypto Bot API (getBalance): {e}")
+        return None
+
+
+# --- КЛАВИАТУРЫ ---
+def get_main_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🧾 Список пользователей")],
-            [KeyboardButton(text="📨 Рассылка"), KeyboardButton(text="💼 Задания (Админ)")], # Изменил название
-            [KeyboardButton(text="🚫 Заблокировать"), KeyboardButton(text="🔓 Разблокировать")],
-            [KeyboardButton(text="✏️ Редактировать пользователя")],
-            [KeyboardButton(text="📥 Экспорт данных")],
-            [KeyboardButton(text="🔧 Техперерыв Вкл" if not maintenance_mode else "🔧 Техперерыв Выкл")],
-            [KeyboardButton(text="🔙 Назад")]
+            [KeyboardButton(text="💎 Майнинг"), KeyboardButton(text="🚀 Задания")],
+            [KeyboardButton(text="👥 Рефералы"), KeyboardButton(text="💰 Баланс")],
+            [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="⚙️ Настройки")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
 
-async def get_tasks_kb() -> ReplyKeyboardMarkup:
-    all_tasks = await db_get_all_tasks()
-    kb = []
-    # Разделяем кнопки на несколько строк, чтобы не было слишком длинных
-    current_row = []
-    for i, task in enumerate(all_tasks):
-        current_row.append(KeyboardButton(text=f"Задание {task['task_num']}"))
-        if len(current_row) == 2 or i == len(all_tasks) - 1: # По 2 кнопки в ряд или последняя строка
-            kb.append(current_row)
-            current_row = []
-
-    kb.append([KeyboardButton(text="🔙 Назад")])
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
-def get_task_kb(task_num: int) -> ReplyKeyboardMarkup:
+def get_balance_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=f"✅ Выполнил задание {task_num}")],
-            [KeyboardButton(text="🔙 Назад")]
+            [KeyboardButton(text="➕ Пополнить"), KeyboardButton(text="➖ Вывести")],
+            [KeyboardButton(text="⬅️ Назад")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
 
-# Упрощенная клавиатура для топов, без выбора периода для заданий
-def get_tops_type_kb() -> ReplyKeyboardMarkup:
+def get_admin_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🏆 Топы приглашений"), KeyboardButton(text="🏆 Топы заданий")], # Исправлено: KeyboardButton
-            [KeyboardButton(text="🔙 Назад")]
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="✍️ Объявление")],
+            [KeyboardButton(text="➕ Добавить задание"), KeyboardButton(text="❌ Удалить задание")],
+            [KeyboardButton(text="✅ Проверить задания"), KeyboardButton(text="💰 Проверить вывод")],
+            [KeyboardButton(text="⚙️ Администраторские настройки"), KeyboardButton(text="⬅️ Назад")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
 
-def get_tasks_admin_kb() -> ReplyKeyboardMarkup:
+def get_tasks_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➡️ Выполнить задание"), KeyboardButton(text="Мои выполненные задания")],
+            [KeyboardButton(text="🏆 Топ заданий")],
+            [KeyboardButton(text:"⬅️ Назад")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+def get_tasks_admin_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Добавить задание"), KeyboardButton(text="❌ Удалить задание")],
-            [KeyboardButton(text="🔙 Назад в админку")]
+            [KeyboardButton(text="⬅️ Назад в админ-панель")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
 
-def get_edit_user_kb() -> ReplyKeyboardMarkup:
+def get_mining_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="💰 Баланс")],
-            [KeyboardButton(text="👥 Количество рефералов")], # Новое поле
-            [KeyboardButton(text="✅ Выдать задание")], # Новое поле
-            [KeyboardButton(text="🔙 Назад")]
+            [KeyboardButton(text="⛏️ Начать майнинг"), KeyboardButton(text="📈 Улучшить майнер")],
+            [KeyboardButton(text="⬅️ Назад")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
 
-# =====================
-# ФУНКЦИИ ВЫВОДА И ПОПОЛНЕНИЯ (через Crypto Bot API)
-# =====================
+def get_settings_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔗 Привязать BTC кошелек")],
+            [KeyboardButton(text="🔗 Привязать TRC20 кошелек")],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
 
-async def create_crypto_bot_check(user_id: int, amount_usdt: float) -> dict:
-    if not CRYPTO_BOT_TOKEN:
-        logger.warning("Crypto Bot API Token не установлен. Невозможно создать чек.")
-        return {'ok': False, 'error': {'name': 'Crypto Bot API Token не установлен'}}
+def get_admin_settings_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔧 Техперерыв Вкл"), KeyboardButton(text="🔧 Техперерыв Выкл")],
+            [KeyboardButton(text="⬅️ Назад в админ-панель")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
 
-    headers = {
-        'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
-        'Content-Type': 'application/json'
-    }
+def get_withdrawal_currency_kb():
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="USDT", callback_data="withdraw_usdt"))
+    builder.add(InlineKeyboardButton(text="BTC", callback_data="withdraw_btc"))
+    builder.add(InlineKeyboardButton(text="TRC20", callback_data="withdraw_trc20"))
+    return builder.as_markup()
 
-    payload = {
-        'asset': 'USDT',
-        'amount': f"{amount_usdt:.2f}", # Форматируем до 2 знаков после запятой
-        'description': f'Вывод средств пользователя {user_id}',
-        'payload': str(user_id), # Используем user_id как payload для идентификации
-        'public': True # Чек будет публичным, чтобы пользователь мог его активировать
-    }
+def get_admin_decision_kb(proof_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_proof_{proof_id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_proof_{proof_id}")
+    )
+    return builder.as_markup()
 
-    try:
-        response = requests.post(
-            f'{CRYPTO_BOT_API_URL}createCheck',
-            headers=headers,
-            json=payload,
-            timeout=15
-        )
-        response_data = response.json()
-        logger.info(f"Crypto Bot API Response (createCheck): {response_data}")
-        return response_data
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при создании чека (сетевая ошибка): {e}")
-        return {'ok': False, 'error': {'name': f"Ошибка сети при создании чека: {e}"}}
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка при создании чека: {e}")
-        return {'ok': False, 'error': {'name': str(e)}}
+def get_admin_withdrawal_decision_kb(withdrawal_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_withdrawal_{withdrawal_id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_withdrawal_{withdrawal_id}")
+    )
+    return builder.as_markup()
 
-async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
-    if not CRYPTO_BOT_TOKEN:
-        logger.warning("Crypto Bot API Token не установлен. Невозможно создать инвойс.")
-        return {'ok': False, 'error': {'name': 'Crypto Bot API Token не установлен'}}
+def get_back_to_main_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True # Часто удобно, чтобы она скрывалась после использования
+    )
 
-    headers = {
-        'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
-        'Content-Type': 'application/json'
-    }
+# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
 
-    payload = {
-        'asset': 'USDT',
-        'amount': f"{amount_usdt:.2f}",
-        'description': f'Пополнение баланса пользователя {user_id}',
-        'payload': str(user_id),
-        'allow_anonymous': True # <--- Изменено: Устанавливаем True для compact mode
-    }
+@dp.message(CommandStart(deep_link=True))
+@error_handler_decorator
+async def cmd_start_deep_link(message: types.Message, command: CommandObject):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.full_name
+    referrer_id = None
+    invited_by_link = None
 
-    try:
-        response = requests.post(
-            f'{CRYPTO_BOT_API_URL}createInvoice',
-            headers=headers,
-            json=payload,
-            timeout=15
-        )
-        response_data = response.json()
-        logger.info(f"Crypto Bot API Response (createInvoice): {response_data}")
-        return response_data
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при создании инвойса (сетевая ошибка): {e}")
-        return {'ok': False, 'error': {'name': f"Ошибка сети при создании инвойса: {e}"}}
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка при создании инвойса: {e}")
-        return {'ok': False, 'error': {'name': str(e)}}
+    if command.args:
+        try:
+            referrer_id = int(command.args)
+            if referrer_id == user_id: # Пользователь не может быть реферером для самого себя
+                referrer_id = None
+            else:
+                logger.info(f"Пользователь {user_id} пришел по реферальной ссылке от {referrer_id}")
+        except ValueError:
+            invited_by_link = command.args
+            logger.info(f"Пользователь {user_id} пришел по кастомной ссылке: {invited_by_link}")
 
-async def check_invoice_status(invoice_id: int) -> dict:
-    if not CRYPTO_BOT_TOKEN:
-        logger.warning("Crypto Bot API Token не установлен. Невозможно проверить статус инвойса.")
-        return {'ok': False, 'error': {'name': 'Crypto Bot API Token не установлен'}}
+    await db_add_user(user_id, username, referrer_id, invited_by_link)
 
-    headers = {
-        'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
-        'Content-Type': 'application/json'
-    }
-
-    try:
-        response = requests.get(
-            f'{CRYPTO_BOT_API_URL}getInvoices?invoice_ids={invoice_id}',
-            headers=headers,
-            timeout=15
-        )
-        response_data = response.json()
-        logger.info(f"Crypto Bot API Response (getInvoices for {invoice_id}): {response_data}")
-        return response_data
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при проверке инвойса (сетевая ошибка): {e}")
-        return {'ok': False, 'error': {'name': f"Ошибка сети при проверке инвойса: {e}"}}
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка при проверке инвойса: {e}")
-        return {'ok': False, 'error': {'name': str(e)}}
-
-async def process_withdrawal(user_id: int, amount_zb: int):
-    user_data = await db_get_user(user_id)
-    if not user_data:
-        return False, "Пользователь не найден."
-
-    if user_data['balance'] < amount_zb:
-        return False, "Недостаточно средств на балансе."
-
-    amount_usdt = amount_zb * ZB_EXCHANGE_RATE
-    if amount_usdt < MIN_WITHDRAWAL:
-        return False, f"Минимальная сумма вывода: {MIN_WITHDRAWAL} USDT."
-
-    # Создаем чек
-    check_response = await create_crypto_bot_check(user_id, amount_usdt)
-
-    if not check_response.get('ok', False):
-        error_msg = check_response.get('error', {}).get('name', 'Неизвестная ошибка')
-        return False, f"Ошибка платежной системы: {error_msg}"
-
-    if not check_response.get('result'):
-        return False, "Платежная система не предоставила данные для вывода."
-
-    if 'bot_check_url' not in check_response['result']:
-        return False, "Платежная система не предоставила ссылку для вывода."
-
-    # Уменьшаем баланс только после успешного создания чека
-    new_balance = user_data['balance'] - amount_zb
-    await db_update_user_balance(user_id, new_balance)
-
-    return True, check_response['result']['bot_check_url']
-
-async def process_deposit(user_id: int, amount_usdt: float):
-    user_data = await db_get_user(user_id)
-    if not user_data:
-        return False, "Пользователь не найден."
-
-    # Создаем инвойс
-    invoice_response = await create_crypto_bot_invoice(user_id, amount_usdt)
-
-    if not invoice_response.get('ok', False):
-        error_msg = invoice_response.get('error', {}).get('name', 'Неизвестная ошибка')
-        return False, f"Ошибка платежной системы: {error_msg}"
-
-    if not invoice_response.get('result'):
-        return False, "Платежная система не предоставила данные для оплаты."
-
-    # <--- Изменено: Используем bot_invoice_url вместо pay_url
-    if 'bot_invoice_url' not in invoice_response['result']:
-        return False, "Платежная система не предоставила ссылку для оплаты (bot_invoice_url)."
-
-    return True, {
-        'pay_url': invoice_response['result']['bot_invoice_url'], # <--- Используем bot_invoice_url
-        'invoice_id': invoice_response['result']['invoice_id']
-    }
-
-async def check_payment_status(user_id: int, invoice_id: int, amount_usdt: float):
-    """
-    Фоновая задача для проверки статуса оплаты инвойса.
-    """
-    max_attempts = 60 # Проверяем в течение 10 минут (60 * 10 секунд)
-    attempt = 0
-
-    while attempt < max_attempts:
-        await asyncio.sleep(10) # Проверяем каждые 10 секунд
-
-        invoice_data = await check_invoice_status(invoice_id)
-
-        if not invoice_data.get('ok', False) or not invoice_data.get('result', {}).get('items'):
-            logger.error(f"Ошибка или некорректный ответ при проверке счета {invoice_id}: {invoice_data.get('error', {}).get('name')}")
-            attempt += 1
-            continue
-
-        invoice_status = invoice_data['result']['items'][0]['status']
-        logger.info(f"Статус инвойса {invoice_id} для пользователя {user_id}: {invoice_status}")
-
-        if invoice_status == 'paid':
-            user_data = await db_get_user(user_id)
-            if user_data:
-                amount_zb = int(amount_usdt / ZB_EXCHANGE_RATE)
-                new_balance = user_data['balance'] + amount_zb
-                await db_update_user_balance(user_id, new_balance)
-
-                try:
-                    await bot.send_message(
-                        user_id,
-                        f"✅ Ваш баланс успешно пополнен на {amount_zb} Zebranium!"
-                    )
-                except TelegramForbiddenError:
-                    logger.warning(f"Не удалось отправить уведомление о пополнении пользователю {user_id}: бот заблокирован.")
-                except Exception as e:
-                    logger.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
-            return # Выход из цикла и задачи
-
-        elif invoice_status in ['expired', 'cancelled']:
-            try:
-                await bot.send_message(
-                    user_id,
-                    f"❌ Счет на оплату {amount_usdt} USDT был отменен или истек."
-                )
-            except TelegramForbiddenError:
-                logger.warning(f"Не удалось отправить уведомление пользователю {user_id}: бот заблокирован.")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
-            return # Выход из цикла и задачи
-
-        attempt += 1
-
-    # Если цикл завершился по количеству попыток, а статус не 'paid'
-    try:
-        await bot.send_message(
-            user_id,
-            f"❌ Время ожидания платежа истекло. Если вы произвели оплату, обратитесь в поддержку."
-        )
-    except TelegramForbiddenError:
-        logger.warning(f"Не удалось отправить уведомление пользователю {user_id}: бот заблокирован.")
-    except Exception as e:
-        logger.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
-
-
-# =====================
-# ОСНОВНЫЕ КОМАНДЫ БОТА
-# =====================
+    start_message = (
+        f"👋 Добро пожаловать, {message.from_user.full_name}!\n\n"
+        "Я ваш Crypto Bot для майнинга и заработка криптовалюты.\n"
+        "Выберите действие в меню ниже."
+    )
+    await message.answer(start_message, reply_markup=get_main_kb())
 
 @dp.message(CommandStart())
-@check_not_blocked
-async def cmd_start(message: types.Message, command: CommandObject = None, **kwargs):
-    global maintenance_mode
-    if maintenance_mode and message.from_user.id not in ADMIN_IDS:
-        return # Если техобслуживание, и это не админ, ничего не делаем
-
+@error_handler_decorator
+async def cmd_start_no_deep_link(message: types.Message):
     user_id = message.from_user.id
-    username = message.from_user.username or f"id_{user_id}"
+    username = message.from_user.username or message.from_user.full_name
+    await db_add_user(user_id, username)
 
-    user_data = await db_get_user(user_id)
-
-    if user_data:
-        # Обновляем юзернейм, если он изменился
-        if user_data.get('username') != username:
-            await db_update_username(user_id, username)
-        logger.info(f"Существующий пользователь {user_id} (@{username}) начал/перезапустил бота.")
-    else:
-        # Регистрируем нового пользователя, сохраняя дату в UTC
-        reg_date = datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
-        await db_add_user(user_id, username, reg_date, 0.0, None)
-        logger.info(f"Новый пользователь {user_id} (@{username}) зарегистрирован. Дата: {reg_date}")
-
-        referrer_id = None
-        if command and command.args and command.args.isdigit():
-            referrer_id = int(command.args)
-
-        if referrer_id and referrer_id != user_id: # Нельзя быть своим рефералом
-            # Проверяем, существует ли реферер в БД и еще не является рефералом
-            referrer_in_db = await db_get_user(referrer_id)
-            if referrer_in_db:
-                # Проверяем, что текущий пользователь уже не был чьим-то рефералом
-                conn = await get_db_connection()
-                existing_referral = await conn.fetchrow("SELECT 1 FROM referrals WHERE referred_user_id = $1", user_id)
-                if conn:
-                    await conn.close()
-
-                if not existing_referral:
-                    await db_add_referral(referrer_id, user_id) # Эта функция теперь обновляет referral_count
-                    referrer_data = await db_get_user(referrer_id) # Получаем обновленные данные реферера
-                    logger.info(f"Пользователь {user_id} стал рефералом {referrer_id}. Начислено {REFERRAL_REWARD} ZB.")
-                    try:
-                        await bot.send_message(
-                            referrer_id,
-                            f"🎉 Вы получили {REFERRAL_REWARD} Zebranium за приглашенного реферала {message.from_user.full_name}!"
-                        )
-                    except TelegramForbiddenError:
-                        logger.warning(f"Не удалось отправить сообщение рефереру {referrer_id}: бот заблокирован или пользователь недоступен.")
-                    except Exception as e:
-                        logger.error(f"Ошибка при отправке сообщения рефереру {referrer_id}: {e}")
-                else:
-                    logger.info(f"Пользователь {user_id} уже является рефералом другого пользователя. Реферал не будет засчитан.")
-            else:
-                logger.warning(f"Реферер {referrer_id} не найден в базе данных. Реферал не будет засчитан.")
-
-
-    is_admin = user_id in ADMIN_IDS
-    await message.answer(
-        "🤖 Добро пожаловать в бота!\nВыберите действие в меню ниже:",
-        reply_markup=get_main_kb(is_admin)
+    start_message = (
+        f"👋 Добро пожаловать, {message.from_user.full_name}!\n\n"
+        "Я ваш Crypto Bot для майнинга и заработка криптовалюты.\n"
+        "Выберите действие в меню ниже."
     )
+    await message.answer(start_message, reply_markup=get_main_kb())
 
-@dp.message(F.text == "👀Профиль")
-@check_not_blocked
-async def profile_handler(message: types.Message, **kwargs):
-    user_id = message.from_user.id
-    user_data = await db_get_user(user_id)
-    if not user_data:
-        await message.answer("❌ Ваш профиль не найден. Пожалуйста, начните с команды /start.")
+
+@dp.message(F.text == "⬅️ Назад")
+@error_handler_decorator
+async def go_back(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+    await message.answer("Вы вернулись в главное меню.", reply_markup=get_main_kb())
+
+@dp.message(F.text == "⬅️ Назад в админ-панель")
+@error_handler_decorator
+async def go_back_to_admin(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
         return
-
-    balance = user_data.get('balance', 0.0)
-    referrals_count = user_data.get('referral_count', 0) # Получаем из user_data
-    completed_tasks_count = len(await db_get_user_completed_tasks(user_id))
-
-    builder = InlineKeyboardBuilder()
-    if CRYPTO_BOT_TOKEN: # Показываем кнопки только если токен Crypto Bot API установлен
-        builder.add(InlineKeyboardButton(
-            text="💰 Пополнить баланс",
-            callback_data="deposit_funds"
-        ))
-        builder.add(InlineKeyboardButton(
-            text="💸 Вывести средства",
-            callback_data="withdraw_funds"
-        ))
-        builder.adjust(2) # Размещаем две кнопки в одной строке
-
-    await message.answer(
-        f"👤 Ваш профиль:\n"
-        f"🆔 ID: `{message.from_user.id}`\n"
-        f"🔗 Юзернейм: @{user_data.get('username', '—')}\n"
-        f"📅 Регистрация: {user_data.get('reg_date', '—')}\n" # Теперь здесь может быть "UTC"
-        f"👥 Рефералов: {referrals_count}\n"
-        f"✅ Выполнено заданий: {completed_tasks_count}\n"
-        f"💎 Баланс: {balance:.2f} Zebranium (≈{balance * ZB_EXCHANGE_RATE:.2f} USDT)\n\n"
-        f"Минимальная сумма вывода: {MIN_WITHDRAWAL} USDT",
-        parse_mode="Markdown",
-        reply_markup=builder.as_markup() if CRYPTO_BOT_TOKEN else None # Если нет токена, нет кнопок
-    )
-
-@dp.callback_query(F.data == "deposit_funds")
-@check_not_blocked
-async def deposit_funds_handler(callback: types.CallbackQuery, state: FSMContext, **kwargs):
-    if not CRYPTO_BOT_TOKEN:
-        await callback.answer("❌ Функции пополнения временно недоступны. Обратитесь к администратору.", show_alert=True)
-        return
-
-    await callback.message.answer(
-        "💰 **Пополнение баланса**\n\n"
-        "Введите сумму в USDT, которую хотите внести (например, `5.00` или `10`):\n"
-        "*(Минимальная сумма пополнения может зависеть от Crypto Bot)*",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="🔙 Отмена")]],
-            resize_keyboard=True
-        )
-    )
-    await state.set_state(DepositState.waiting_for_amount)
-    await callback.answer()
-
-@dp.message(DepositState.waiting_for_amount, F.text == "🔙 Отмена")
-@check_not_blocked
-async def cancel_deposit(message: types.Message, state: FSMContext, **kwargs):
-    await message.answer(
-        "❌ Пополнение баланса отменено.",
-        reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
-    )
     await state.clear()
+    await message.answer("Вы вернулись в админ-панель.", reply_markup=get_admin_kb())
 
-@dp.message(DepositState.waiting_for_amount)
-@check_not_blocked
-async def process_deposit_amount(message: types.Message, state: FSMContext, **kwargs):
+# --- ОБРАБОТЧИКИ ГЛАВНОГО МЕНЮ ---
+
+@dp.message(F.text == "💎 Майнинг")
+@error_handler_decorator
+async def mining_menu(message: types.Message):
+    user = await db_get_user(message.from_user.id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
+        return
+
+    mining_info = await db_get_user_mining_upgrade(message.from_user.id)
+    current_level = mining_info['level'] if mining_info else user['mining_level']
+    current_income = mining_info['income'] if mining_info else user['mining_income']
+
+    text = (
+        "<b>💎 Майнинг</b>\n\n"
+        f"Ваш текущий уровень майнинга: <b>{current_level}</b>\n"
+        f"Доход в час: <b>{current_income:.6f} BTC</b>\n\n"
+        "Выберите действие:"
+    )
+    await message.answer(text, reply_markup=get_mining_kb())
+
+@dp.message(F.text == "⛏️ Начать майнинг")
+@error_handler_decorator
+async def start_mining(message: types.Message):
+    user_id = message.from_user.id
+    user = await db_get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
+        return
+
+    last_mine_time = user.get('last_mine_time')
+    current_income = user.get('mining_income', 0.001)
+
+    now_utc = datetime.now(timezone.utc)
+
+    if last_mine_time:
+        # Если last_mine_time - наивная дата, сделаем её осведомленной о UTC
+        if last_mine_time.tzinfo is None:
+            last_mine_time = last_mine_time.replace(tzinfo=timezone.utc)
+        
+        time_since_last_mine = now_utc - last_mine_time
+        if time_since_last_mine < timedelta(hours=1):
+            remaining_time = timedelta(hours=1) - time_since_last_mine
+            minutes = int(remaining_time.total_seconds() // 60)
+            seconds = int(remaining_time.total_seconds() % 60)
+            await message.answer(f"⏳ Вы сможете майнить снова через {minutes} мин. {seconds} сек.")
+            return
+
+    # Рассчитываем доход
+    # Доход за час * количество часов (или 1 час, если прошло больше часа)
+    earned_amount = current_income # Сейчас всегда за 1 час
+    await db_update_user_balance(user_id, earned_amount)
+    await db_update_user_last_mine_time(user_id, now_utc)
+
+    await message.answer(f"✅ Вы успешно намайнили <b>{earned_amount:.6f} BTC</b>. Ваш баланс обновлен.", reply_markup=get_mining_kb())
+
+
+@dp.message(F.text == "📈 Улучшить майнер")
+@error_handler_decorator
+async def upgrade_miner(message: types.Message):
+    user_id = message.from_user.id
+    user = await db_get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
+        return
+
+    current_level = user.get('mining_level', 1)
+    current_income = user.get('mining_income', 0.001)
+    user_balance = user.get('balance', 0.0)
+
+    # Логика для стоимости и нового дохода
+    next_level = current_level + 1
+    upgrade_cost = current_level * 0.0005 # Пример: 1 -> 0.0005, 2 -> 0.001, 3 -> 0.0015
+    new_income = current_income + 0.0001 # Пример: 0.001 -> 0.0011 -> 0.0012
+
+    if user_balance < upgrade_cost:
+        await message.answer(f"❌ У вас недостаточно BTC для улучшения майнера. Для уровня {next_level} требуется {upgrade_cost:.6f} BTC.")
+        return
+
+    # Вычитаем стоимость и обновляем уровень
+    await db_update_user_balance(user_id, -upgrade_cost) # Вычитаем стоимость
+    await db_update_user_mining_upgrade(user_id, next_level, new_income, upgrade_cost)
+    # Также обновляем в users таблице для консистентности, хотя mining_upgrades - основной источник
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET mining_level = $1, mining_income = $2 WHERE user_id = $3", next_level, new_income, user_id)
+
+    await message.answer(
+        f"✅ Ваш майнер улучшен до <b>уровня {next_level}</b>!\n"
+        f"Новый доход в час: <b>{new_income:.6f} BTC</b>.\n"
+        f"С вашего баланса списано: <b>{upgrade_cost:.6f} BTC</b>."
+    )
+
+
+@dp.message(F.text == "👥 Рефералы")
+@error_handler_decorator
+async def referrals_menu(message: types.Message):
+    user_id = message.from_user.id
+    user = await db_get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
+        return
+
+    referral_count = await db_get_referrals_count(user_id)
+    referral_link = f"https://t.me/{bot.me.username}?start={user_id}"
+
+    text = (
+        "<b>👥 Рефералы</b>\n\n"
+        f"Ваша реферальная ссылка: <code>{referral_link}</code>\n\n"
+        f"Приглашенных пользователей: <b>{referral_count}</b>\n\n"
+        "Делитесь своей ссылкой и получайте бонусы за каждого нового пользователя!"
+    )
+    await message.answer(text, reply_markup=get_main_kb())
+
+
+@dp.message(F.text == "💰 Баланс")
+@error_handler_decorator
+async def balance_menu(message: types.Message):
+    user_id = message.from_user.id
+    user = await db_get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
+        return
+
+    btc_balance = user.get('balance', 0.0)
+    usdt_balance = user.get('usdt_balance', 0.0)
+
+    text = (
+        "<b>💰 Ваш баланс:</b>\n\n"
+        f"BTC: <b>{btc_balance:.6f}</b>\n"
+        f"USDT (TRC20): <b>{usdt_balance:.2f}</b>\n\n"
+        "Выберите действие:"
+    )
+    await message.answer(text, reply_markup=get_balance_kb())
+
+
+@dp.message(F.text == "➕ Пополнить")
+@error_handler_decorator
+async def deposit_menu(message: types.Message):
     if not CRYPTO_BOT_TOKEN:
-        await message.answer("❌ Функции пополнения временно недоступны. Обратитесь к администратору.")
+        await message.answer("Функция пополнения временно недоступна. Пожалуйста, свяжитесь с администратором.", reply_markup=get_balance_kb())
+        return
+
+    user_id = message.from_user.id
+    description = f"Пополнение баланса пользователя {user_id}"
+
+    # Пример создания инвойса на 0.1 USDT
+    invoice = await crypto_bot_create_invoice(asset="USDT", amount=0.1, user_id=user_id, description=description)
+
+    if invoice and 'mini_app_invoice_url' in invoice: # Используем mini_app_invoice_url
+        mini_app_url = invoice['mini_app_invoice_url']
+        keyboard = InlineKeyboardBuilder()
+        keyboard.add(InlineKeyboardButton(text="Перейти к оплате", url=mini_app_url))
+        await message.answer(
+            f"Для пополнения баланса USDT (TRC20) на 0.1 USDT, перейдите по ссылке:\n\n"
+            f"🔗 <a href='{mini_app_url}'>Оплатить 0.1 USDT</a>\n\n"
+            "После успешной оплаты ваш баланс будет автоматически обновлен.",
+            reply_markup=keyboard.as_markup(),
+            disable_web_page_preview=True
+        )
+        logger.info(f"Сгенерирован инвойс {invoice['invoice_id']} для пользователя {user_id}.")
+    else:
+        await message.answer("❌ Не удалось создать инвойс для пополнения. Пожалуйста, попробуйте позже.", reply_markup=get_balance_kb())
+
+
+@dp.message(F.text == "➖ Вывести")
+@error_handler_decorator
+async def withdraw_start(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user = await db_get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
+        return
+
+    btc_balance = user.get('balance', 0.0)
+    usdt_balance = user.get('usdt_balance', 0.0)
+    btc_address = user.get('btc_address')
+    trc20_address = user.get('trc20_address') # TRC20_address для USDT TRC20
+
+    text = (
+        "<b>➖ Вывод средств</b>\n\n"
+        f"Ваш текущий баланс BTC: <b>{btc_balance:.6f}</b>\n"
+        f"Ваш текущий баланс USDT (TRC20): <b>{usdt_balance:.2f}</b>\n\n"
+        f"Привязанный BTC кошелек: <code>{btc_address if btc_address else 'Не привязан'}</code>\n"
+        f"Привязанный TRC20 кошелек: <code>{trc20_address if trc20_address else 'Не привязан'}</code>\n\n"
+        "Выберите, в какой валюте хотите вывести средства:"
+    )
+    await message.answer(text, reply_markup=get_withdrawal_currency_kb())
+    await state.set_state(WithdrawState.waiting_for_currency)
+
+@dp.callback_query(WithdrawState.waiting_for_currency, F.data.startswith("withdraw_"))
+@error_handler_decorator
+async def withdraw_currency_selected(callback_query: types.CallbackQuery, state: FSMContext):
+    currency = callback_query.data.split('_')[1].upper()
+    user_id = callback_query.from_user.id
+    user = await db_get_user(user_id)
+    await callback_query.answer() # Отвечаем на callback_query, чтобы убрать "часики"
+
+    if not user:
+        await bot.send_message(user_id, "Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
         await state.clear()
         return
 
-    try:
-        amount_usdt = float(message.text.replace(',', '.')) # Для корректной обработки десятичных дробей
-        if amount_usdt <= 0:
-            raise ValueError("Сумма должна быть положительной.")
+    min_amount = 0
+    balance = 0
+    address = None
 
-        user_id = message.from_user.id
-        success, result = await process_deposit(user_id, amount_usdt)
-
-        if success:
-            invoice_url = result['pay_url'] # <--- Теперь это bot_invoice_url
-            invoice_id = result['invoice_id']
-
-            await message.answer(
-                f"✅ **Счет на оплату создан!**\n"
-                f"Сумма: `{amount_usdt:.2f}` USDT\n"
-                f"Для оплаты перейдите в Crypto Bot: [Оплатить]({invoice_url})\n\n" # <--- Изменен текст ссылки
-                "После оплаты баланс будет зачислен автоматически. Пожалуйста, ожидайте.",
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-                reply_markup=get_main_kb(user_id in ADMIN_IDS)
-            )
-            # Запускаем фоновую проверку статуса платежа
-            asyncio.create_task(check_payment_status(user_id, invoice_id, amount_usdt))
-        else:
-            await message.answer(
-                f"❌ Ошибка при создании счета: {result}",
-                reply_markup=get_main_kb(user_id in ADMIN_IDS)
-            )
-    except ValueError as ve:
-        await message.answer(f"❌ Неверный формат суммы. Пожалуйста, введите положительное число (например, `5.00`). Ошибка: {ve}", parse_mode="Markdown")
-        return
-    except Exception as e:
-        logger.error(f"Непредвиденная ошибка при обработке пополнения для пользователя {user_id}: {e}")
-        await message.answer("❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте еще раз или обратитесь в поддержку.", reply_markup=get_main_kb(user_id in ADMIN_IDS))
-
-    await state.clear()
-
-
-@dp.callback_query(F.data == "withdraw_funds")
-@check_not_blocked
-async def withdraw_funds_handler(callback: types.CallbackQuery, state: FSMContext, **kwargs):
-    if not CRYPTO_BOT_TOKEN:
-        await callback.answer("❌ Функции вывода временно недоступны. Обратитесь к администратору.", show_alert=True)
+    if currency == "BTC":
+        balance = user.get('balance', 0.0)
+        min_amount = min_withdrawal_amount_btc
+        address = user.get('btc_address')
+        currency_display = "BTC"
+    elif currency == "USDT" or currency == "TRC20": # USDT TRC20
+        balance = user.get('usdt_balance', 0.0)
+        min_amount = min_withdrawal_amount_usdt if currency == "USDT" else min_withdrawal_amount_trc20 # Если у вас разные лимиты для USDT и TRC20
+        address = user.get('trc20_address') # Адрес TRC20 для вывода USDT/TRC20
+        currency_display = "USDT (TRC20)"
+    else:
+        await bot.send_message(user_id, "Неизвестная валюта для вывода. Пожалуйста, выберите из предложенных.", reply_markup=get_balance_kb())
+        await state.clear()
         return
 
-    user_id = callback.from_user.id
-    user_data = await db_get_user(user_id)
-    if not user_data:
-        await callback.message.answer("❌ Ваш профиль не найден. Пожалуйста, начните с команды /start.")
-        await callback.answer()
-        return
-
-    balance = user_data.get('balance', 0.0)
-    max_withdraw_zb = int(balance) # Выводим только целые Zebranium
-    max_withdraw_usdt = max_withdraw_zb * ZB_EXCHANGE_RATE
-
-    if max_withdraw_usdt < MIN_WITHDRAWAL:
-        await callback.message.answer(
-            f"❌ У вас недостаточно Zebranium для вывода.\n"
-            f"Текущий баланс: {balance:.2f} Zebranium (≈{max_withdraw_usdt:.2f} USDT)\n"
-            f"Минимальная сумма вывода: {MIN_WITHDRAWAL} USDT."
+    if not address:
+        await bot.send_message(user_id,
+            f"❌ У вас не привязан кошелек для вывода {currency_display}. "
+            "Пожалуйста, привяжите его в разделе '⚙️ Настройки'.",
+            reply_markup=get_settings_kb() # Возможно, лучше main_kb, если пользователь не в состоянии
         )
-        await callback.answer()
+        await state.clear()
         return
 
-    await callback.message.answer(
-        f"💸 **Вывод средств**\n\n"
-        f"Доступно для вывода: `{max_withdraw_zb}` Zebranium (≈`{max_withdraw_usdt:.2f}` USDT)\n"
-        f"Минимальная сумма вывода: `{MIN_WITHDRAWAL}` USDT\n\n"
-        f"Введите целую сумму Zebranium для вывода (например, `100`):",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="🔙 Отмена")]],
-            resize_keyboard=True
-        )
-    )
+    await state.update_data(withdrawal_currency=currency, withdrawal_address=address)
     await state.set_state(WithdrawState.waiting_for_amount)
-    await callback.answer()
-
-@dp.message(WithdrawState.waiting_for_amount, F.text == "🔙 Отмена")
-@check_not_blocked
-async def cancel_withdrawal(message: types.Message, state: FSMContext, **kwargs):
-    await message.answer(
-        "❌ Вывод средств отменен.",
-        reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
+    await bot.send_message(
+        user_id,
+        f"Введите сумму для вывода в {currency_display}. Ваш баланс: <b>{balance:.6f if currency == 'BTC' else balance:.2f}</b>.\n"
+        f"Минимальная сумма вывода: <b>{min_amount:.6f if currency == 'BTC' else min_amount:.2f}</b>.",
+        reply_markup=get_back_to_main_kb() # Можно дать кнопку "Назад"
     )
-    await state.clear()
 
 @dp.message(WithdrawState.waiting_for_amount)
-@check_not_blocked
-async def process_withdrawal_amount(message: types.Message, state: FSMContext, **kwargs):
-    if not CRYPTO_BOT_TOKEN:
-        await message.answer("❌ Функции вывода временно недоступны. Обратитесь к администратору.")
+@error_handler_decorator
+async def withdraw_amount_received(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user_data = await state.get_data()
+    currency = user_data['withdrawal_currency']
+    address = user_data['withdrawal_address']
+
+    try:
+        amount = float(message.text)
+    except ValueError:
+        await message.answer("❌ Сумма должна быть числом. Попробуйте еще раз.")
+        return
+
+    user = await db_get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
         await state.clear()
         return
 
-    try:
-        amount_zb = int(message.text)
-        if amount_zb <= 0:
-            raise ValueError("Сумма должна быть положительной.")
+    balance = user.get('balance', 0.0) if currency == "BTC" else user.get('usdt_balance', 0.0)
+    min_amount = min_withdrawal_amount_btc if currency == "BTC" else (min_withdrawal_amount_usdt if currency == "USDT" else min_withdrawal_amount_trc20)
 
-        user_id = message.from_user.id
-        success, result = await process_withdrawal(user_id, amount_zb)
-
-        if success:
-            await message.answer(
-                f"✅ **Запрос на вывод {amount_zb} Zebranium (≈{amount_zb * ZB_EXCHANGE_RATE:.2f} USDT) принят!**\n"
-                f"Для получения средств перейдите по ссылке: [Активировать чек]({result})\n\n"
-                "Чек действует ограниченное время.",
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-                reply_markup=get_main_kb(user_id in ADMIN_IDS)
-            )
-        else:
-            await message.answer(
-                f"❌ Ошибка: {result}",
-                reply_markup=get_main_kb(user_id in ADMIN_IDS)
-            )
-    except ValueError as ve:
-        await message.answer(f"❌ Неверный формат суммы. Пожалуйста, введите целое положительное число. Ошибка: {ve}")
+    if amount <= 0:
+        await message.answer("❌ Сумма вывода должна быть положительной. Попробуйте еще раз.")
         return
-    except Exception as e:
-        logger.error(f"Непредвиденная ошибка при обработке вывода для пользователя {user_id}: {e}")
-        await message.answer("❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте еще раз или обратитесь в поддержку.", reply_markup=get_main_kb(user_id in ADMIN_IDS))
+    if amount < min_amount:
+        await message.answer(f"❌ Сумма вывода должна быть не менее {min_amount:.6f if currency == 'BTC' else min_amount:.2f} {currency}. Попробуйте еще раз.")
+        return
+    if amount > balance:
+        await message.answer(f"❌ Недостаточно средств на балансе. У вас: {balance:.6f if currency == 'BTC' else balance:.2f} {currency}. Попробуйте еще раз.")
+        return
 
-    await state.clear()
+    # Записываем запрос на вывод
+    withdrawal_id = await db_add_withdrawal_request(user_id, amount, currency, address)
 
-
-@dp.message(F.text == "👥Рефералы")
-@check_not_blocked
-async def referrals_handler(message: types.Message, **kwargs):
-    user_id = message.from_user.id
-    bot_username = (await bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start={user_id}"
-    count = await db_get_referrals_count(user_id) # Теперь получает из `referral_count` в `users`
+    # Вычитаем из баланса пользователя сразу
+    if currency == "BTC":
+        await db_update_user_balance(user_id, -amount)
+    elif currency == "USDT" or currency == "TRC20":
+        await db_update_user_usdt_balance(user_id, -amount)
 
     await message.answer(
-        f"👥 **Ваши рефералы:**\n"
-        f"У вас **{count}** рефералов.\n\n"
-        f"Пригласите друзей по вашей ссылке и получайте **{REFERRAL_REWARD} Zebranium** за каждого!\n"
-        f"Ваша реферальная ссылка:\n`{link}`",
-        parse_mode="Markdown"
+        f"✅ Запрос на вывод {amount:.6f if currency == 'BTC' else amount:.2f} {currency} на адрес <code>{address}</code> создан (ID: {withdrawal_id}).\n"
+        "Администратор рассмотрит вашу заявку в ближайшее время.",
+        reply_markup=get_balance_kb()
     )
+    await state.clear()
 
-@dp.message(F.text == "💼Задания")
-@check_not_blocked
-async def tasks_handler(message: types.Message, **kwargs):
-    await message.answer("💼 Выберите задание:", reply_markup=await get_tasks_kb())
-
-@dp.message(F.text.regexp(r"^Задание (\d+)$"))
-@check_not_blocked
-async def show_specific_task(message: types.Message, state: FSMContext, **kwargs):
-    try:
-        task_num = int(message.text.split()[1])
-    except (IndexError, ValueError):
-        await message.answer("❌ Неверный формат команды. Пожалуйста, выберите задание из меню.", reply_markup=await get_tasks_kb())
-        return
-
-    task_data = await db_get_task(task_num)
-    user_id = message.from_user.id
-    user_completed_tasks = await db_get_user_completed_tasks(user_id)
-
-    if not task_data:
-        await message.answer("❌ Такого задания не существует.", reply_markup=await get_tasks_kb())
-        return
-
-    text = task_data['text']
-    photo_file_id = task_data['photo']
-
-    status_message = ""
-    if task_num in user_completed_tasks:
-        status_message = f"✅ Вы уже выполнили это задание {user_completed_tasks[task_num]}."
-    else:
-        status_message = "Вы еще не выполнили это задание."
-
-    caption_text = f"💼 **Задание {task_num}:**\n{text}\n\n{status_message}"
-
-    if photo_file_id:
+    # Уведомление админов
+    for admin_id in ADMIN_IDS:
         try:
-            await bot.send_photo(
-                chat_id=message.chat.id,
-                photo=photo_file_id,
-                caption=caption_text,
-                parse_mode="Markdown",
-                reply_markup=get_task_kb(task_num)
+            await bot.send_message(admin_id,
+                f"🔔 НОВЫЙ ЗАПРОС НА ВЫВОД!\n"
+                f"Пользователь: {message.from_user.full_name} (ID: {user_id})\n"
+                f"Сумма: {amount:.6f if currency == 'BTC' else amount:.2f} {currency}\n"
+                f"Адрес: <code>{address}</code>\n"
+                f"ID запроса: {withdrawal_id}",
+                reply_markup=get_admin_withdrawal_decision_kb(withdrawal_id)
             )
-        except Exception as e:
-            logger.error(f"Не удалось отправить фото задания {task_num} пользователю {user_id}: {e}")
-            await message.answer(
-                f"{caption_text}\n\n"
-                f"*(Ошибка при загрузке фото. Возможно, фото было удалено или недоступно.)*",
-                parse_mode="Markdown",
-                reply_markup=get_task_kb(task_num)
-            )
-    else:
-        await message.answer(
-            caption_text,
-            parse_mode="Markdown",
-            reply_markup=get_task_kb(task_num)
-        )
-
-    await state.update_data(current_task_num=task_num)
-
-@dp.message(F.text.regexp(r"^✅ Выполнил задание (\d+)$"))
-@check_not_blocked
-async def complete_task_button(message: types.Message, state: FSMContext, **kwargs):
-    try:
-        task_num = int(message.text.split()[2])
-    except (IndexError, ValueError):
-        await message.answer("❌ Неверный формат команды. Пожалуйста, выберите 'Выполнил задание' из меню.", reply_markup=await get_tasks_kb())
-        return
-
-    user_id = message.from_user.id
-    user_completed_tasks = await db_get_user_completed_tasks(user_id)
-    if task_num in user_completed_tasks:
-        await message.answer(
-            f"⛔ Вы уже выполнили задание {task_num}. Отправьте доказательство для другого задания, или выберите 'Назад'.",
-            reply_markup=get_task_kb(task_num)
-        )
-        return
-
-    await state.set_state(TaskStates.waiting_for_proof)
-    await state.update_data(current_task_num=task_num)
-    await message.answer("Отправьте фото-доказательство выполнения задания.")
-
-@dp.message(TaskStates.waiting_for_proof, F.photo)
-@check_not_blocked
-async def process_task_proof(message: types.Message, state: FSMContext, **kwargs):
-    user_id = message.from_user.id
-    data = await state.get_data()
-    task_num = data.get('current_task_num')
-
-    if not task_num:
-        await message.answer("❌ Произошла ошибка. Пожалуйста, выберите задание еще раз.")
-        await state.clear()
-        return
-
-    user_completed_tasks = await db_get_user_completed_tasks(user_id)
-    if task_num in user_completed_tasks:
-        await message.answer(
-            f"⛔ Вы уже выполнили задание {task_num}. Отправьте доказательство для другого задания, или выберите 'Назад'.",
-            reply_markup=get_task_kb(task_num)
-        )
-        return
-
-    proof_photo_file_id = message.photo[-1].file_id # Берем фото с наибольшим разрешением
-    completion_date = datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC') # Сохраняем в UTC
-    
-    await db_add_task_proof(user_id, task_num, proof_photo_file_id, completion_date)
-    logger.info(f"Пользователь {user_id} отправил доказательство для задания {task_num}. Дата: {completion_date}")
-
-    # Начисляем награду
-    user_data = await db_get_user(user_id)
-    reward = random.randint(*TASK_REWARD_RANGE)
-    new_balance = user_data['balance'] + reward
-    await db_update_user_balance(user_id, new_balance)
-    logger.info(f"Начислено {reward} ZB пользователю {user_id} за задание {task_num}. Новый баланс: {new_balance}.")
-
-    await message.answer(
-        f"✅ Доказательство для задания {task_num} принято! На ваш баланс зачислено **{reward} Zebranium**.",
-        parse_mode="Markdown",
-        reply_markup=await get_tasks_kb()
-    )
-    await state.clear()
-
-@dp.message(TaskStates.waiting_for_proof)
-@check_not_blocked
-async def process_task_proof_invalid(message: types.Message, state: FSMContext, **kwargs):
-    await message.answer("❌ Пожалуйста, отправьте фото-доказательство или нажмите 'Назад'.")
-
-@dp.message(F.text == "⛏️Майнинг")
-@check_not_blocked
-async def mining_handler(message: types.Message, **kwargs):
-    user_id = message.from_user.id
-    user_data = await db_get_user(user_id)
-    if not user_data:
-        await message.answer("❌ Ваш профиль не найден. Пожалуйста, начните с команды /start.")
-        return
-
-    last_mine_time_str = user_data.get('last_mine_time')
-    current_time = datetime.now(timezone.utc) # Используем UTC
-
-    if last_mine_time_str:
-        try:
-            # Сначала пытаемся распарсить с ' UTC' для новых записей
-            last_mine_time = datetime.strptime(last_mine_time_str, '%Y-%m-%d %H:%M:%S UTC')
-        except ValueError:
-            # Если не получилось, это старая запись без ' UTC', предполагаем, что она в UTC
-            last_mine_time = datetime.strptime(last_mine_time_str, '%Y-%m-%d %H:%M:%S')
-            last_mine_time = last_mine_time.replace(tzinfo=timezone.utc) # Добавляем UTC timezone
-
-        time_since_last_mine = current_time - last_mine_time
-        remaining_cooldown = MINING_COOLDOWN - time_since_last_mine.total_seconds()
-
-        if remaining_cooldown > 0:
-            hours, remainder = divmod(remaining_cooldown, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            await message.answer(
-                f"⛏️ Майнинг недоступен. Следующая возможность майнить через "
-                f"{int(hours)} ч {int(minutes)} мин {int(seconds)} сек."
-            )
-            return
-
-    reward = random.randint(*MINING_REWARD_RANGE)
-    new_balance = user_data['balance'] + reward
-    # Сохраняем время майнинга в UTC
-    await db_update_user_balance(user_id, new_balance)
-    await db_update_user_last_mine_time(user_id, current_time.strftime('%Y-%m-%d %H:%M:%S UTC')) # <--- Добавил ' UTC'
-    logger.info(f"Пользователь {user_id} успешно помайнил и получил {reward} ZB. Новый баланс: {new_balance}.")
-
-    await message.answer(f"⛏️ Вы успешно помайнили и получили **{reward} Zebranium**!", parse_mode="Markdown")
-
-@dp.message(F.text == "📈Топы")
-@check_not_blocked
-async def tops_handler(message: types.Message, state: FSMContext, **kwargs):
-    await message.answer("📈 Выберите тип топов:", reply_markup=get_tops_type_kb())
-    await state.set_state(TopStates.waiting_top_type)
-
-@dp.message(TopStates.waiting_top_type, F.text == "🏆 Топы приглашений")
-@check_not_blocked
-async def top_referrals_handler(message: types.Message, state: FSMContext, **kwargs):
-    top_users_data = await db_get_all_users_with_referral_count()
-
-    # Сортируем по количеству рефералов в убывающем порядке
-    top_users_data.sort(key=lambda x: x[2], reverse=True)
-
-    result = "🏆 **Топ приглашений (всего):**\n\n"
-    if not top_users_data:
-        result = "🏆 Топ приглашений пуст."
-    else:
-        for i, (user_id, username, count) in enumerate(top_users_data[:10], 1): # Топ-10
-            username_str = f"@{username}" if username else f"ID: `{user_id}`"
-            result += f"{i}. {username_str} - **{count}** рефералов\n"
-
-    await message.answer(result, parse_mode="Markdown", reply_markup=get_tops_type_kb())
-    await state.clear()
-
-
-@dp.message(TopStates.waiting_top_type, F.text == "🏆 Топы заданий")
-@check_not_blocked
-async def top_tasks_handler(message: types.Message, state: FSMContext, **kwargs):
-    # Теперь эта функция сразу показывает топ заданий без выбора периода
-    result = await get_top_completed_tasks_all_time()
-    await message.answer(result, parse_mode="Markdown", reply_markup=get_tops_type_kb())
-    await state.clear()
-
-# Новая функция для получения топа выполненных заданий за все время
-async def get_top_completed_tasks_all_time():
-    all_completed_tasks_raw = await db_get_all_completed_tasks_raw()
-
-    # Считаем количество выполненных заданий для каждого пользователя
-    user_task_counts = defaultdict(int)
-    for row in all_completed_tasks_raw:
-        user_task_counts[row['user_id']] += 1
-
-    final_top_users = [] # (user_id, count, username)
-    # Оптимизация: получаем данные о пользователях один раз
-    all_users_data = {}
-    user_ids_in_top = list(user_task_counts.keys())
-    if user_ids_in_top:
-        conn = await get_db_connection()
-        try:
-            # Получаем все usernames для пользователей, которые выполнили задания
-            rows = await conn.fetch("SELECT user_id, username FROM users WHERE user_id = ANY($1)", user_ids_in_top)
-            for row in rows:
-                all_users_data[row['user_id']] = {'username': row['username']}
-        finally:
-            if conn:
-                await conn.close()
-
-
-    for user_id, count in user_task_counts.items():
-        username = all_users_data.get(user_id, {}).get('username', '—')
-        final_top_users.append((user_id, count, username))
-
-    final_top_users.sort(key=lambda x: x[1], reverse=True)
-
-    if not final_top_users:
-        return "🏆 **Топ заданий пуст.**"
-
-    result = "🏆 **Топ заданий (всего):**\n\n"
-    for i, (user_id, count, username) in enumerate(final_top_users[:10], 1): # Топ-10
-        username_str = f"@{username}" if username else f"ID: `{user_id}`"
-        result += f"{i}. {username_str} - **{count}** заданий\n"
-
-    return result
-
-
-@dp.message(F.text == "✉️Помощь")
-@check_not_blocked
-async def help_handler(message: types.Message, **kwargs):
-    await message.answer(
-        "👋 **Как использовать бота:**\n\n"
-        "👀 **Профиль:** Просмотр вашего баланса, количества рефералов и выполненных заданий. Здесь же можно пополнить или вывести Zebranium.\n"
-        "👥 **Рефералы:** Получите вашу уникальную реферальную ссылку и приглашайте друзей, чтобы получать бонусы.\n"
-        "💼 **Задания:** Выполняйте простые задания (например, подписаться на канал, посмотреть видео) и получайте Zebranium.\n"
-        "⛏️ **Майнинг:** Получайте бесплатные Zebranium каждые 1 час.\n"
-        "📈 **Топы:** Просматривайте рейтинги самых активных пользователей по количеству приглашений и выполненных заданий.\n\n"
-        "Если у вас возникли вопросы, свяжитесь с администратором.",
-        parse_mode="Markdown"
-    )
-
-@dp.message(F.text == "🔙 Назад")
-@check_not_blocked
-async def back_to_main_menu(message: types.Message, state: FSMContext, **kwargs):
-    current_state = await state.get_state()
-    if current_state == TaskStates.waiting_for_proof:
-        # Если были в состоянии ожидания доказательства, возвращаемся к выбору заданий
-        await message.answer("Выбор задания:", reply_markup=await get_tasks_kb())
-    elif current_state and current_state.startswith("TopStates"): # Для всех состояний топов
-        await message.answer("Выбор типа топов:", reply_markup=get_tops_type_kb())
-    elif current_state and current_state.startswith("DepositState"): # Для всех состояний пополнения
-        is_admin = message.from_user.id in ADMIN_IDS
-        await message.answer("Возвращаемся в главное меню.", reply_markup=get_main_kb(is_admin))
-    elif current_state and current_state.startswith("WithdrawState"): # Для всех состояний вывода
-        is_admin = message.from_user.id in ADMIN_IDS
-        await message.answer("Возвращаемся в главное меню.", reply_markup=get_main_kb(is_admin))
-    else:
-        # Для всех остальных случаев возвращаемся в главное меню
-        is_admin = message.from_user.id in ADMIN_IDS
-        await message.answer("Возвращаемся в главное меню.", reply_markup=get_main_kb(is_admin))
-    await state.clear()
-
-
-# =====================
-# АДМИН-КОМАНДЫ
-# =====================
-
-@dp.message(F.text == "👑Админка")
-async def admin_menu(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("⛔ У вас нет доступа к админ-панели.")
-        return
-    global maintenance_mode # Используем глобальную переменную
-    await message.answer("Добро пожаловать в админ-панель!", reply_markup=get_admin_kb())
-
-@dp.message(F.text == "🔙 Назад в админку")
-async def back_to_admin_menu(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await state.clear()
-    global maintenance_mode # Используем глобальную переменную
-    await message.answer("Возвращаемся в админ-панель.", reply_markup=get_admin_kb())
-
-@dp.message(F.text == "📊 Статистика")
-async def show_stats(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    total_users = len(await db_get_all_user_ids())
-    total_balance = await db_get_total_balance()
-    total_tasks_completed = await db_get_total_completed_tasks_count()
-
-    await message.answer(
-        f"📊 **Статистика бота:**\n"
-        f"👥 Всего пользователей: {total_users}\n"
-        f"💰 Общий баланс Zebranium: {total_balance:.2f}\n"
-        f"✅ Всего выполнено заданий: {total_tasks_completed}",
-        parse_mode="Markdown",
-        reply_markup=get_admin_kb()
-    )
-
-@dp.message(F.text == "🧾 Список пользователей")
-async def list_users(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    all_user_ids = await db_get_all_user_ids()
-    if not all_user_ids:
-        await message.answer("Список пользователей пуст.", reply_markup=get_admin_kb())
-        return
-
-    users_info = []
-    for user_id in all_user_ids:
-        user_data = await db_get_user(user_id)
-        if user_data:
-            username = user_data.get('username', '—')
-            balance = user_data.get('balance', 0.0)
-            referrals = user_data.get('referral_count', 0)
-            users_info.append(f"ID: `{user_id}`, @{username}, Баланс: {balance:.2f}, Рефералов: {referrals}")
-
-    # Ограничиваем количество пользователей, если их слишком много
-    if len(users_info) > 50:
-        await message.answer(
-            "**Список пользователей (первые 50):**\n\n" + "\n".join(users_info[:50]),
-            parse_mode="Markdown",
-            reply_markup=get_admin_kb()
-        )
-        return
-    await message.answer(
-        "**Список пользователей:**\n\n" + "\n".join(users_info) or "Список пуст.",
-        parse_mode="Markdown",
-        reply_markup=get_admin_kb()
-    )
-
-@dp.message(F.text == "📨 Рассылка")
-async def start_broadcast(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer(
-        "Введите сообщение для рассылки всем пользователям. "
-        "Поддерживается HTML-разметка (например, `<b>жирный</b>`, `<i>курсив</i>`, `<a href=\"URL\">ссылка</a>`):",
-        parse_mode="Markdown"
-    )
-    await state.set_state(BroadcastState.waiting_for_message)
-
-@dp.message(BroadcastState.waiting_for_message)
-async def process_broadcast_message(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    broadcast_text = message.html_text # Сохраняем форматирование
-    all_user_ids = await db_get_all_user_ids()
-
-    sent_count = 0
-    blocked_count = 0
-
-    for user_id in all_user_ids:
-        try:
-            await bot.send_message(user_id, broadcast_text, parse_mode="HTML")
-            sent_count += 1
-            await asyncio.sleep(0.05) # Небольшая задержка, чтобы избежать RateLimit
         except TelegramForbiddenError:
-            logger.warning(f"Пользователь {user_id} заблокировал бота. Добавляем в список заблокированных.")
-            await db_block_user(user_id) # Блокируем пользователя в БД
-            blocked_count += 1
+            logger.warning(f"Админ {admin_id} заблокировал бота.")
         except Exception as e:
-            logger.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
+            logger.error(f"Ошибка при уведомлении админа {admin_id} о выводе: {e}")
 
-    await message.answer(
-        f"✅ Рассылка завершена. Отправлено {sent_count} сообщений. "
-        f"Заблокировано ботом {blocked_count} пользователей.",
-        reply_markup=get_admin_kb()
+@dp.message(F.text == "ℹ️ Информация")
+@error_handler_decorator
+async def info_menu(message: types.Message):
+    info_text = (
+        "<b>ℹ️ Информация о боте</b>\n\n"
+        "Этот бот позволяет вам 'майнить' виртуальную криптовалюту, выполнять задания и приглашать друзей для получения бонусов.\n\n"
+        "💎 <b>Майнинг</b>: Автоматически генерирует доход с течением времени. Вы можете улучшать свой майнер для увеличения прибыли.\n"
+        "🚀 <b>Задания</b>: Выполняйте простые задачи и получайте награды.\n"
+        "👥 <b>Рефералы</b>: Приглашайте новых пользователей по своей уникальной ссылке и получайте бонусы.\n"
+        "💰 <b>Баланс</b>: Отслеживайте свой баланс и управляйте пополнениями/выводами.\n\n"
+        "<b>Правила и условия:</b>\n"
+        "1. Запрещено использовать любые виды накрутки или обмана.\n"
+        "2. Все выплаты обрабатываются вручную администратором. Сроки обработки могут варьироваться.\n"
+        "3. В случае обнаружения нарушений, администрация оставляет за собой право заблокировать аккаунт без объяснения причин.\n\n"
+        "По всем вопросам обращайтесь к администратору: @UsernameAdmin" # Замените на реальное имя админа
     )
-    await state.clear()
+    await message.answer(info_text, reply_markup=get_main_kb())
 
-@dp.message(F.text == "🚫 Заблокировать")
-async def start_block_user(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
+@dp.message(F.text == "⚙️ Настройки")
+@error_handler_decorator
+async def settings_menu(message: types.Message):
+    user_id = message.from_user.id
+    user = await db_get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден. Пожалуйста, перезапустите бота /start.", reply_markup=get_main_kb())
         return
-    await message.answer("Введите ID пользователя, которого нужно заблокировать:")
-    await state.set_state(BlockState.waiting_for_id)
 
-@dp.message(BlockState.waiting_for_id)
-async def process_block_user_id(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    try:
-        user_id_to_block = int(message.text)
-        if await db_is_user_blocked(user_id_to_block):
-            await message.answer(f"❌ Пользователь {user_id_to_block} уже заблокирован.", reply_markup=get_admin_kb())
-        else:
-            await db_block_user(user_id_to_block)
-            await message.answer(f"✅ Пользователь {user_id_to_block} заблокирован.", reply_markup=get_admin_kb())
-            logger.info(f"Админ {message.from_user.id} заблокировал пользователя {user_id_to_block}.")
-    except ValueError:
-        await message.answer("❌ Неверный ID пользователя. Пожалуйста, введите число.")
-    await state.clear()
+    btc_address = user.get('btc_address')
+    trc20_address = user.get('trc20_address')
 
-@dp.message(F.text == "🔓 Разблокировать")
-async def start_unblock_user(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Введите ID пользователя, которого нужно разблокировать:")
-    await state.set_state(UnblockState.waiting_for_id)
-
-@dp.message(UnblockState.waiting_for_id)
-async def process_unblock_user_id(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    try:
-        user_id_to_unblock = int(message.text)
-        if not await db_is_user_blocked(user_id_to_unblock):
-            await message.answer(f"❌ Пользователь {user_id_to_unblock} не был заблокирован.", reply_markup=get_admin_kb())
-        else:
-            await db_unblock_user(user_id_to_unblock)
-            await message.answer(f"✅ Пользователь {user_id_to_unblock} разблокирован.", reply_markup=get_admin_kb())
-            logger.info(f"Админ {message.from_user.id} разблокировал пользователя {user_id_to_unblock}.")
-    except ValueError:
-        await message.answer("❌ Неверный ID пользователя. Пожалуйста, введите число.")
-    await state.clear()
-
-
-@dp.message(F.text == "💼 Задания (Админ)")
-async def admin_tasks_menu(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Выберите действие с заданиями:", reply_markup=get_tasks_admin_kb())
-
-@dp.message(F.text == "➕ Добавить задание")
-async def start_add_task(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Введите номер нового задания (целое положительное число):")
-    await state.set_state(AddTaskState.waiting_for_task_number)
-
-@dp.message(AddTaskState.waiting_for_task_number)
-async def process_add_task_number(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    try:
-        task_num = int(message.text)
-        if task_num <= 0:
-            raise ValueError
-        await state.update_data(new_task_num=task_num)
-        await message.answer("Введите текст нового задания:")
-        await state.set_state(AddTaskState.waiting_for_task_text)
-    except ValueError:
-        await message.answer("❌ Неверный номер задания. Пожалуйста, введите положительное целое число.")
-
-@dp.message(AddTaskState.waiting_for_task_text)
-async def process_add_task_text(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    task_text = message.text
-    if not task_text.strip():
-        await message.answer("❌ Текст задания не может быть пустым. Пожалуйста, введите текст задания:")
-        return
-    await state.update_data(new_task_text=task_text)
-    await message.answer("Теперь отправьте фото для задания (или 'Пропустить', если фото не нужно):",
-                         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Пропустить")]], resize_keyboard=True))
-    await state.set_state(AddTaskState.waiting_for_task_photo)
-
-@dp.message(AddTaskState.waiting_for_task_photo, F.text == "Пропустить")
-async def process_add_task_photo_skip(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    data = await state.get_data()
-    task_num = data['new_task_num']
-    task_text = data['new_task_text']
-    await db_add_task(task_num, task_text, None)
-    logger.info(f"Админ {message.from_user.id} добавил задание {task_num} без фото.")
-
-    await message.answer(
-        f"✅ Задание {task_num} успешно добавлено (без фото).",
-        reply_markup=get_tasks_admin_kb()
+    text = (
+        "<b>⚙️ Настройки</b>\n\n"
+        f"Ваш привязанный BTC кошелек: <code>{btc_address if btc_address else 'Не привязан'}</code>\n"
+        f"Ваш привязанный TRC20 кошелек: <code>{trc20_address if trc20_address else 'Не привязан'}</code>\n\n"
+        "Выберите действие:"
     )
+    await message.answer(text, reply_markup=get_settings_kb())
+
+@dp.message(F.text == "🔗 Привязать BTC кошелек")
+@error_handler_decorator
+async def link_btc_wallet(message: types.Message, state: FSMContext):
+    await message.answer("Пожалуйста, отправьте ваш BTC адрес (для вывода средств):", reply_markup=get_back_to_main_kb())
+    await state.set_state(Form.btc_address)
+
+@dp.message(Form.btc_address)
+@error_handler_decorator
+async def process_btc_address(message: types.Message, state: FSMContext):
+    btc_address = message.text.strip()
+    # Простая валидация (можно улучшить)
+    if len(btc_address) < 26 or len(btc_address) > 35: # Примерная длина BTC адреса
+        await message.answer("❌ Похоже на неверный BTC адрес. Пожалуйста, попробуйте еще раз.")
+        return
+
+    await db_update_user_btc_address(message.from_user.id, btc_address)
+    await message.answer(f"✅ Ваш BTC кошелек <code>{btc_address}</code> успешно привязан!", reply_markup=get_settings_kb())
     await state.clear()
 
-@dp.message(AddTaskState.waiting_for_task_photo, F.photo)
-async def process_add_task_photo(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
+@dp.message(F.text == "🔗 Привязать TRC20 кошелек")
+@error_handler_decorator
+async def link_trc20_wallet(message: types.Message, state: FSMContext):
+    await message.answer("Пожалуйста, отправьте ваш TRC20 адрес (для вывода средств USDT TRC20):", reply_markup=get_back_to_main_kb())
+    await state.set_state(Form.trc20_address)
+
+@dp.message(Form.trc20_address)
+@error_handler_decorator
+async def process_trc20_address(message: types.Message, state: FSMContext):
+    trc20_address = message.text.strip()
+    # TRC20 адреса начинаются с 'T' и имеют длину 34 символа
+    if not trc20_address.startswith('T') or len(trc20_address) != 34:
+        await message.answer("❌ Похоже на неверный TRC20 адрес (должен начинаться с 'T' и быть 34 символа). Пожалуйста, попробуйте еще раз.")
         return
-    data = await state.get_data()
-    task_num = data['new_task_num']
-    task_text = data['new_task_text']
-    photo_file_id = message.photo[-1].file_id
-    await db_add_task(task_num, task_text, photo_file_id)
-    logger.info(f"Админ {message.from_user.id} добавил задание {task_num} с фото.")
 
-    await message.answer(
-        f"✅ Задание {task_num} успешно добавлено (с фото).",
-        reply_markup=get_tasks_admin_kb()
-    )
-    await state.clear()
-
-@dp.message(AddTaskState.waiting_for_task_photo)
-async def process_add_task_photo_invalid(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("❌ Пожалуйста, отправьте фото или нажмите 'Пропустить'.")
-
-
-@dp.message(F.text == "❌ Удалить задание")
-async def start_delete_task(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Введите номер задания, которое нужно удалить:")
-    await state.set_state(DeleteTaskState.waiting_for_task_number)
-
-@dp.message(DeleteTaskState.waiting_for_task_number)
-async def process_delete_task_number(message: types.Message, state: FSMContext): # Исправлено: types.Saga на types.Message
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    try:
-        task_num = int(message.text)
-        task_data = await db_get_task(task_num)
-        if not task_data:
-            await message.answer(f"❌ Задание с номером {task_num} не найдено.", reply_markup=get_tasks_admin_kb())
-        else:
-            await db_delete_task(task_num)
-            await message.answer(f"✅ Задание {task_num} успешно удалено.", reply_markup=get_tasks_admin_kb())
-            logger.info(f"Админ {message.from_user.id} удалил задание {task_num}.")
-    except ValueError:
-        await message.answer("❌ Неверный номер задания. Пожалуйста, введите целое число.")
-    await state.clear()
-
-@dp.message(F.text == "✏️ Редактировать пользователя")
-async def start_edit_user(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Введите ID пользователя, которого нужно отредактировать:")
-    await state.set_state(EditUserState.waiting_for_id)
-
-@dp.message(EditUserState.waiting_for_id)
-async def process_edit_user_id(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    try:
-        user_id_to_edit = int(message.text)
-        user_data = await db_get_user(user_id_to_edit)
-        if not user_data:
-            await message.answer(f"❌ Пользователь с ID {user_id_to_edit} не найден.", reply_markup=get_admin_kb())
-            await state.clear()
-            return
-
-        await state.update_data(user_id_to_edit=user_id_to_edit)
-        await message.answer(
-            f"Пользователь {user_id_to_edit} (@{user_data.get('username', '—')}) найден.\n"
-            f"Выберите поле для редактирования:",
-            reply_markup=get_edit_user_kb()
-        )
-        await state.set_state(EditUserState.waiting_for_field)
-    except ValueError:
-        await message.answer("❌ Неверный ID пользователя. Пожалуйста, введите число.")
-
-@dp.message(EditUserState.waiting_for_field, F.text == "💰 Баланс")
-async def edit_user_balance(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    data = await state.get_data()
-    user_id_to_edit = data['user_id_to_edit']
-    user_data = await db_get_user(user_id_to_edit)
-    await message.answer(
-        f"Текущий баланс пользователя {user_id_to_edit}: {user_data['balance']:.2f} Zebranium.\n"
-        f"Введите новый баланс:"
-    )
-    await state.set_state(EditUserState.waiting_for_value)
-    await state.update_data(field_to_edit='balance')
-
-@dp.message(EditUserState.waiting_for_field, F.text == "👥 Количество рефералов")
-async def edit_user_referral_count(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    data = await state.get_data()
-    user_id_to_edit = data['user_id_to_edit']
-    user_data = await db_get_user(user_id_to_edit)
-    await message.answer(
-        f"Текущее количество рефералов пользователя {user_id_to_edit}: {user_data['referral_count']}.\n"
-        f"Введите новое количество рефералов:"
-    )
-    await state.set_state(EditUserState.waiting_for_value)
-    await state.update_data(field_to_edit='referral_count')
-
-@dp.message(EditUserState.waiting_for_field, F.text == "✅ Выдать задание")
-async def edit_user_assign_task(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    data = await state.get_data()
-    user_id_to_edit = data['user_id_to_edit']
-    await message.answer("Введите номер задания, которое нужно выдать пользователю:")
-    await state.set_state(EditUserState.waiting_for_task_num_to_assign)
-
-
-@dp.message(EditUserState.waiting_for_field, F.text == "🔙 Назад")
-async def cancel_edit_user_field(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Отменено редактирование пользователя.", reply_markup=get_admin_kb())
+    await db_update_user_trc20_address(message.from_user.id, trc20_address)
+    await message.answer(f"✅ Ваш TRC20 кошелек <code>{trc20_address}</code> успешно привязан!", reply_markup=get_settings_kb())
     await state.clear()
 
 
-@dp.message(EditUserState.waiting_for_value)
-async def process_edit_user_value(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    data = await state.get_data()
-    user_id_to_edit = data['user_id_to_edit']
-    field_to_edit = data['field_to_edit']
+# --- ОБРАБОТЧИКИ ЗАДАНИЙ ---
 
-    try:
-        if field_to_edit == 'balance':
-            new_value = float(message.text.replace(',', '.'))
-            if new_value < 0:
-                await message.answer("❌ Баланс не может быть отрицательным.")
-                await state.set_state(EditUserState.waiting_for_value) # Остаемся в этом состоянии
-                return
-            await db_update_user_balance(user_id_to_edit, new_value)
-            await message.answer(
-                f"✅ Баланс пользователя {user_id_to_edit} обновлен до {new_value:.2f} Zebranium.",
-                reply_markup=get_admin_kb()
-            )
-            logger.info(f"Админ {message.from_user.id} изменил баланс пользователя {user_id_to_edit} на {new_value}.")
-        elif field_to_edit == 'referral_count':
-            new_value = int(message.text)
-            if new_value < 0:
-                await message.answer("❌ Количество рефералов не может быть отрицательным.")
-                await state.set_state(EditUserState.waiting_for_value) # Остаемся в этом состоянии
-                return
-            await db_update_referral_count(user_id_to_edit, new_value)
-            await message.answer(
-                f"✅ Количество рефералов пользователя {user_id_to_edit} обновлено до {new_value}.",
-                reply_markup=get_admin_kb()
-            )
-            logger.info(f"Админ {message.from_user.id} изменил количество рефералов пользователя {user_id_to_edit} на {new_value}.")
-        else:
-            await message.answer("❌ Неизвестное поле для редактирования.", reply_markup=get_admin_kb())
-    except ValueError:
-        await message.answer("❌ Неверное значение. Пожалуйста, введите числовое значение.")
-    except Exception as e:
-        logger.error(f"Ошибка при редактировании пользователя {user_id_to_edit}: {e}")
-        await message.answer("❌ Произошла ошибка при сохранении. Попробуйте еще раз.", reply_markup=get_admin_kb())
+@dp.message(F.text == "🚀 Задания")
+@error_handler_decorator
+async def tasks_menu(message: types.Message):
+    await message.answer("Добро пожаловать в раздел заданий! Выберите действие:", reply_markup=get_tasks_kb())
 
-    await state.clear()
+@dp.message(F.text == "➡️ Выполнить задание") # Исправлено для точного совпадения с текстом кнопки
+@error_handler_decorator
+async def start_task_completion(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    active_tasks = await db_get_active_tasks()
+    user_completed_tasks = await db_get_user_completed_tasks(user_id)
+    completed_task_ids = {task['task_id'] for task in user_completed_tasks}
 
-
-@dp.message(EditUserState.waiting_for_task_num_to_assign)
-async def process_assign_task_number(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    data = await state.get_data()
-    user_id_to_edit = data['user_id_to_edit']
-
-    try:
-        task_num_to_assign = int(message.text)
-        task_data = await db_get_task(task_num_to_assign)
-
-        if not task_data:
-            await message.answer(f"❌ Задание с номером {task_num_to_assign} не найдено. Введите корректный номер задания.",
-                                 reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔙 Отмена")]], resize_keyboard=True))
-            return
-
-        user_completed_tasks = await db_get_user_completed_tasks(user_id_to_edit)
-        if task_num_to_assign in user_completed_tasks:
-            await message.answer(f"⛔ Пользователь {user_id_to_edit} уже выполнил задание {task_num_to_assign}.",
-                                 reply_markup=get_admin_kb())
-            await state.clear()
-            return
-
-        # Помечаем задание как выполненное для пользователя
-        completion_date = datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
-        # Здесь мы не можем просто поставить "manually_added_by_admin"
-        # Для простоты, если админ выдает, можно использовать какой-то ID, или просто пустую строку,
-        # если фото-доказательство не обязательно для таких "выданных" заданий.
-        # Если фото обязательно, то это требует дополнительной логики загрузки фото.
-        # Для начала, пусть будет "admin_assigned"
-        await db_add_task_proof(user_id_to_edit, task_num_to_assign, "admin_assigned", completion_date)
-
-        # Начисляем награду
-        user_data = await db_get_user(user_id_to_edit)
-        reward = random.randint(*TASK_REWARD_RANGE)
-        new_balance = user_data['balance'] + reward
-        await db_update_user_balance(user_id_to_edit, new_balance)
-
-        await message.answer(
-            f"✅ Задание {task_num_to_assign} успешно выдано пользователю {user_id_to_edit}."
-            f" На его баланс зачислено {reward} Zebranium.",
-            parse_mode="Markdown",
-            reply_markup=get_admin_kb()
-        )
-        logger.info(f"Админ {message.from_user.id} выдал задание {task_num_to_assign} пользователю {user_id_to_edit}.")
-
-    except ValueError:
-        await message.answer("❌ Неверный номер задания. Пожалуйста, введите целое число.")
-    except Exception as e:
-        logger.error(f"Ошибка при выдаче задания пользователю {user_id_to_edit}: {e}")
-        await message.answer("❌ Произошла ошибка при выдаче задания. Попробуйте еще раз.", reply_markup=get_admin_kb())
-
-    await state.clear()
-
-
-@dp.message(F.text == "📥 Экспорт данных")
-async def export_data(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    users_data = await db_get_users_for_export()
-
-    # Определяем столбцы для DataFrame
-    columns = [
-        "user_id", "username", "reg_date", "balance",
-        "referral_count", "completed_task_nums", "completed_task_dates"
+    available_tasks = [
+        task for task in active_tasks
+        if task['task_id'] not in completed_task_ids
     ]
 
-    df = pd.DataFrame(users_data, columns=columns)
+    if not available_tasks:
+        await message.answer("Пока нет доступных заданий для выполнения. Пожалуйста, попробуйте позже.", reply_markup=get_tasks_kb())
+        await state.clear()
+        return
 
-    # Сохраняем в Excel
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='UsersData')
-    excel_buffer.seek(0)
+    text = "Выберите номер задания, которое хотите выполнить:\n\n"
+    keyboard_builder = InlineKeyboardBuilder()
 
-    # Отправляем файл
-    try:
-        await message.answer_document(
-            BufferedInputFile(excel_buffer.getvalue(), filename="user_data.xlsx"),
-            caption="Данные пользователей успешно экспортированы."
+    for task in available_tasks:
+        text += (
+            f"<b>Задание #{task['task_id']}: {task['task_name']}</b>\n"
+            f"Описание: {task['task_description']}\n"
+            f"Награда: <b>{task['reward']:.2f} BTC</b>\n\n"
         )
-        logger.info(f"Админ {message.from_user.id} экспортировал данные пользователей.")
-    except Exception as e:
-        logger.error(f"Ошибка при отправке файла экспорта админу {message.from_user.id}: {e}")
-        await message.answer("❌ Произошла ошибка при экспорте данных.")
+        keyboard_builder.add(InlineKeyboardButton(text=f"Выбрать #{task['task_id']}", callback_data=f"select_task_{task['task_id']}"))
+
+    keyboard_builder.adjust(2) # Размещаем кнопки по 2 в ряд
+    await message.answer(text, reply_markup=keyboard_builder.as_markup())
+    await state.set_state(Form.task_id)
+
+
+@dp.callback_query(Form.task_id, F.data.startswith("select_task_"))
+@error_handler_decorator
+async def process_selected_task(callback_query: types.CallbackQuery, state: FSMContext):
+    task_id = int(callback_query.data.split('_')[2])
+    user_id = callback_query.from_user.id
+    await callback_query.answer() # Отвечаем на callback_query
+
+    task = await db_get_task(task_id)
+    if not task or task['status'] != 'active':
+        await bot.send_message(user_id, "❌ Это задание неактивно или не существует.")
+        await state.clear()
+        return
+
+    if await db_has_completed_task(user_id, task_id):
+        await bot.send_message(user_id, "Вы уже выполнили это задание ранее.")
+        await state.clear()
+        return
+
+    await state.update_data(task_id=task_id)
+    await bot.send_message(
+        user_id,
+        f"Вы выбрали задание #{task_id}: <b>{task['task_name']}</b>.\n"
+        "Отправьте подтверждение выполнения (текст и/или фото):",
+        reply_markup=get_back_to_main_kb()
+    )
+    await state.set_state(Form.proof_text)
+
+
+@dp.message(Form.proof_text)
+@error_handler_decorator
+async def process_proof_text(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("Действие отменено. Выберите действие:", reply_markup=get_tasks_kb())
+        return
+
+    proof_text = message.text
+    user_data = await state.get_data()
+    task_id = user_data['task_id']
+
+    await state.update_data(proof_text=proof_text)
+    await message.answer("Теперь, если требуется, отправьте фото-доказательство выполнения (или нажмите '⬅️ Назад', если фото не нужно):", reply_markup=get_back_to_main_kb())
+    await state.set_state(Form.proof_photo)
+
+@dp.message(Form.proof_photo, F.photo | F.text == "⬅️ Назад") # Можно принимать фото ИЛИ команду "Назад"
+@error_handler_decorator
+async def process_proof_photo(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if message.text == "⬅️ Назад":
+        user_data = await state.get_data()
+        task_id = user_data['task_id']
+        proof_text = user_data.get('proof_text')
+        proof_photo_id = None # Нет фото
+
+        proof_id = await db_add_task_proof(user_id, task_id, proof_text=proof_text, proof_photo_id=proof_photo_id)
+        await message.answer(
+            f"✅ Ваше подтверждение для задания #{task_id} (ID: {proof_id}) отправлено на проверку.\n"
+            "Вы получите уведомление после проверки.",
+            reply_markup=get_tasks_kb()
+        )
+        await state.clear()
+        # Уведомление админов
+        await notify_admins_new_proof(proof_id, user_id, task_id)
+        return
+
+    if message.photo:
+        proof_photo_id = message.photo[-1].file_id # Берем самое большое фото
+        user_data = await state.get_data()
+        task_id = user_data['task_id']
+        proof_text = user_data.get('proof_text')
+
+        proof_id = await db_add_task_proof(user_id, task_id, proof_text=proof_text, proof_photo_id=proof_photo_id)
+        await message.answer(
+            f"✅ Ваше подтверждение для задания #{task_id} (ID: {proof_id}) отправлено на проверку.\n"
+            "Вы получите уведомление после проверки.",
+            reply_markup=get_tasks_kb()
+        )
+        await state.clear()
+        # Уведомление админов
+        await notify_admins_new_proof(proof_id, user_id, task_id)
+    else:
+        await message.answer("Пожалуйста, отправьте фото или нажмите '⬅️ Назад', если фото не требуется.")
+
+
+@dp.message(F.text == "Мои выполненные задания")
+@error_handler_decorator
+async def show_my_completed_tasks(message: types.Message):
+    user_id = message.from_user.id
+    completed_tasks = await db_get_user_completed_tasks(user_id)
+
+    if not completed_tasks:
+        await message.answer("Вы еще не выполнили ни одного задания.", reply_markup=get_tasks_kb())
+        return
+
+    text = "<b>Ваши выполненные задания:</b>\n\n"
+    for comp_task in completed_tasks:
+        task_info = await db_get_task(comp_task['task_id'])
+        if task_info:
+            completion_date_str = comp_task['completion_date'].strftime('%d.%m.%Y %H:%M') if comp_task['completion_date'] else 'Неизвестно'
+            text += f"▪️ <b>{task_info['task_name']}</b> (ID: {task_info['task_id']})\n"
+            text += f"   <i>Выполнено: {completion_date_str}</i>\n"
+            text += f"   <i>Награда: {task_info['reward']:.2f} BTC</i>\n\n"
+        else:
+            text += f"▪️ Задание с ID {comp_task['task_id']} (информация не найдена)\n"
+
+    await message.answer(text, reply_markup=get_tasks_kb())
+
+@dp.message(F.text == "🏆 Топ заданий")
+@error_handler_decorator
+async def top_tasks_menu(message: types.Message):
+    # Временное решение - можно сделать отдельную функцию для расчета топа
+    # Пока что просто заглушка или вывод общей инфы
+    text = (
+        "<b>🏆 Топ заданий</b>\n\n"
+        "Эта функция пока в разработке. Здесь будет отображаться рейтинг пользователей по количеству выполненных заданий."
+    )
+    await message.answer(text, reply_markup=get_tasks_kb())
+
+
+# --- АДМИН-ФУНКЦИИ ---
+
+@dp.message(F.text == "⚙️ Администраторские настройки")
+@error_handler_decorator
+async def admin_settings_menu(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("Администраторские настройки:", reply_markup=get_admin_settings_kb())
+
 
 @dp.message(F.text == "🔧 Техперерыв Вкл")
+@error_handler_decorator
 async def enable_maintenance(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -1814,6 +1332,7 @@ async def enable_maintenance(message: types.Message):
     logger.info(f"Админ {message.from_user.id} включил режим технического обслуживания.")
 
 @dp.message(F.text == "🔧 Техперерыв Выкл")
+@error_handler_decorator
 async def disable_maintenance(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -1822,6 +1341,489 @@ async def disable_maintenance(message: types.Message):
     await message.answer("✅ Режим технического обслуживания выключен. Бот снова доступен всем пользователям.", reply_markup=get_admin_kb())
     logger.info(f"Админ {message.from_user.id} выключил режим технического обслуживания.")
 
+@dp.message(F.text == "📊 Статистика")
+@error_handler_decorator
+async def send_stats(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    users_data = await db_get_all_users_data()
+    tasks_data = await db_get_all_tasks_data()
+    proofs_data = await db_get_all_task_proofs_data()
+    withdrawals_data = await db_get_all_withdrawals_data()
+
+    total_users = len(users_data)
+    total_balance_btc = sum(u['balance'] for u in users_data)
+    total_balance_usdt = sum(u['usdt_balance'] for u in users_data)
+    
+    pending_proofs_count = sum(1 for p in proofs_data if p['status'] == 'pending')
+    pending_withdrawals_count = sum(1 for w in withdrawals_data if w['status'] == 'pending')
+
+    stats_text = (
+        "<b>📊 Статистика бота:</b>\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"💰 Общий баланс BTC: {total_balance_btc:.6f}\n"
+        f"💰 Общий баланс USDT (TRC20): {total_balance_usdt:.2f}\n"
+        f"🚀 Всего активных заданий: {len([t for t in tasks_data if t['status'] == 'active'])}\n"
+        f"✅ Ожидают проверки заданий: {pending_proofs_count}\n"
+        f"💸 Ожидают вывода средств: {pending_withdrawals_count}\n"
+    )
+
+    # Optional: Generate Excel reports
+    output_xlsx = io.BytesIO()
+    with pd.ExcelWriter(output_xlsx, engine='xlsxwriter') as writer:
+        pd.DataFrame(users_data).to_excel(writer, sheet_name='Users', index=False)
+        pd.DataFrame(tasks_data).to_excel(writer, sheet_name='Tasks', index=False)
+        pd.DataFrame(proofs_data).to_excel(writer, sheet_name='Proofs', index=False)
+        pd.DataFrame(withdrawals_data).to_excel(writer, sheet_name='Withdrawals', index=False)
+
+    output_xlsx.seek(0)
+    
+    # Get Crypto Bot balance if token is set
+    crypto_balances = None
+    if CRYPTO_BOT_TOKEN:
+        crypto_balances = await crypto_bot_get_balance()
+        if crypto_balances:
+            stats_text += "\n<b>Баланс Crypto Bot:</b>\n"
+            for asset, amount in crypto_balances.items():
+                stats_text += f"- {asset}: {amount}\n"
+        else:
+            stats_text += "\n<i>Не удалось получить баланс Crypto Bot.</i>\n"
+
+
+    await message.answer(stats_text, reply_markup=get_admin_kb())
+    await bot.send_document(
+        message.from_user.id,
+        BufferedInputFile(output_xlsx.getvalue(), filename="bot_data.xlsx"),
+        caption="Полная статистика в Excel файле."
+    )
+
+
+@dp.message(F.text == "✍️ Объявление")
+@error_handler_decorator
+async def start_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("Введите текст объявления, который будет отправлен всем пользователям:", reply_markup=get_back_to_main_kb())
+    await state.set_state(AdminBroadcastState.waiting_for_message)
+
+@dp.message(AdminBroadcastState.waiting_for_message)
+@error_handler_decorator
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("Отправка объявления отменена.", reply_markup=get_admin_kb())
+        return
+
+    broadcast_text = message.html_text # Используем html_text для сохранения форматирования
+    user_ids = await db_get_all_users_ids()
+    sent_count = 0
+    blocked_count = 0
+
+    for user_id in user_ids:
+        try:
+            await bot.send_message(user_id, broadcast_text)
+            sent_count += 1
+            await asyncio.sleep(0.05) # Небольшая задержка, чтобы избежать лимитов Telegram
+        except TelegramForbiddenError:
+            blocked_count += 1
+            logger.warning(f"Пользователь {user_id} заблокировал бота.")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
+
+    await message.answer(
+        f"✅ Объявление отправлено {sent_count} пользователям.\n"
+        f"❌ Не удалось отправить {blocked_count} пользователям (вероятно, заблокировали бота).",
+        reply_markup=get_admin_kb()
+    )
+    await state.clear()
+
+
+@dp.message(F.text == "➕ Добавить задание")
+@error_handler_decorator
+async def admin_add_task_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("Введите название нового задания:", reply_markup=get_back_to_main_kb())
+    await state.set_state(AdminAddTaskState.waiting_for_name)
+
+@dp.message(AdminAddTaskState.waiting_for_name)
+@error_handler_decorator
+async def admin_add_task_name(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("Добавление задания отменено.", reply_markup=get_admin_kb())
+        return
+    await state.update_data(task_name=message.text)
+    await message.answer("Введите описание задания:", reply_markup=get_back_to_main_kb())
+    await state.set_state(AdminAddTaskState.waiting_for_description)
+
+@dp.message(AdminAddTaskState.waiting_for_description)
+@error_handler_decorator
+async def admin_add_task_description(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("Добавление задания отменено.", reply_markup=get_admin_kb())
+        return
+    await state.update_data(task_description=message.text)
+    await message.answer("Введите награду за задание (число, например, 0.0001 BTC):", reply_markup=get_back_to_main_kb())
+    await state.set_state(AdminAddTaskState.waiting_for_reward)
+
+@dp.message(AdminAddTaskState.waiting_for_reward)
+@error_handler_decorator
+async def admin_add_task_reward(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("Добавление задания отменено.", reply_markup=get_admin_kb())
+        return
+    try:
+        reward = float(message.text)
+        if reward <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Награда должна быть положительным числом. Попробуйте еще раз.")
+        return
+
+    user_data = await state.get_data()
+    task_name = user_data['task_name']
+    task_description = user_data['task_description']
+
+    task_id = await db_add_task(task_name, task_description, reward)
+    await message.answer(f"✅ Задание '{task_name}' (ID: {task_id}) успешно добавлено с наградой {reward:.6f} BTC.", reply_markup=get_admin_kb())
+    await state.clear()
+
+
+@dp.message(F.text == "❌ Удалить задание")
+@error_handler_decorator
+async def admin_delete_task_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    active_tasks = await db_get_active_tasks()
+    if not active_tasks:
+        await message.answer("Активных заданий для удаления нет.", reply_markup=get_admin_kb())
+        return
+
+    text = "Введите ID задания, которое хотите удалить:\n\n"
+    for task in active_tasks:
+        text += f"ID: {task['task_id']} | Название: {task['task_name']}\n"
+    await message.answer(text, reply_markup=get_back_to_main_kb())
+    await state.set_state(DeleteTaskState.waiting_for_task_number)
+
+@dp.message(DeleteTaskState.waiting_for_task_number)
+@error_handler_decorator
+async def admin_delete_task_id(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("Удаление задания отменено.", reply_markup=get_admin_kb())
+        return
+    try:
+        task_id = int(message.text)
+        task = await db_get_task(task_id)
+        if not task:
+            await message.answer("❌ Задание с таким ID не найдено. Попробуйте еще раз.")
+            return
+        await db_delete_task(task_id)
+        await message.answer(f"✅ Задание с ID {task_id} успешно удалено.", reply_markup=get_admin_kb())
+    except ValueError:
+        await message.answer("❌ ID задания должен быть числом. Попробуйте еще раз.")
+    finally:
+        await state.clear()
+
+@dp.message(F.text == "✅ Проверить задания")
+@error_handler_decorator
+async def admin_check_proofs(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    pending_proofs = await db_get_pending_proofs()
+    if not pending_proofs:
+        await message.answer("Нет заданий, ожидающих проверки.", reply_markup=get_admin_kb())
+        return
+
+    proof_list_text = "<b>Задания, ожидающие проверки:</b>\n\n"
+    for proof in pending_proofs:
+        task = await db_get_task(proof['task_id'])
+        user = await db_get_user(proof['user_id'])
+        username = user['username'] if user and user['username'] else 'Неизвестный пользователь'
+        task_name = task['task_name'] if task else 'Неизвестное задание'
+        submission_date = proof['submission_date'].strftime('%d.%m.%Y %H:%M') if proof['submission_date'] else 'Неизвестно'
+
+        proof_list_text += (
+            f"<b>ID подтверждения:</b> {proof['proof_id']}\n"
+            f"<b>От пользователя:</b> @{username} (ID: {proof['user_id']})\n"
+            f"<b>Задание:</b> {task_name} (ID: {proof['task_id']})\n"
+            f"<b>Текст:</b> {proof['proof_text'] if proof['proof_text'] else 'Нет текста'}\n"
+            f"<b>Дата:</b> {submission_date}\n"
+        )
+        if proof['proof_photo_id']:
+            proof_list_text += "Фото: [см. следующее сообщение]\n"
+        proof_list_text += "-----------------------------------\n\n"
+
+    await message.answer(proof_list_text)
+    await asyncio.sleep(0.5) # Небольшая пауза, чтобы сообщения не сливались
+
+    for proof in pending_proofs:
+        if proof['proof_photo_id']:
+            try:
+                await bot.send_photo(message.from_user.id, proof['proof_photo_id'], caption=f"Фото для подтверждения ID: {proof['proof_id']}")
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Не удалось отправить фото {proof['proof_photo_id']} админу {message.from_user.id}: {e}")
+                await bot.send_message(message.from_user.id, f"Ошибка при отправке фото для подтверждения ID {proof['proof_id']}. Возможно, фото удалено или недоступно.")
+
+    await message.answer("Введите ID подтверждения, которое хотите проверить:", reply_markup=get_back_to_main_kb())
+    await state.set_state(ApproveTaskState.waiting_for_proof_id)
+
+@dp.message(ApproveTaskState.waiting_for_proof_id)
+@error_handler_decorator
+async def admin_process_proof_id(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("Проверка заданий отменена.", reply_markup=get_admin_kb())
+        return
+    try:
+        proof_id = int(message.text)
+        proof = await db_get_proof(proof_id)
+        if not proof or proof['status'] != 'pending':
+            await message.answer("❌ Подтверждение с таким ID не найдено или уже обработано. Попробуйте еще раз.")
+            return
+
+        user = await db_get_user(proof['user_id'])
+        task = await db_get_task(proof['task_id'])
+        username = user['username'] if user and user['username'] else 'Неизвестный пользователь'
+        task_name = task['task_name'] if task else 'Неизвестное задание'
+        reward = task['reward'] if task else 0.0
+
+        confirmation_text = (
+            f"<b>Проверка подтверждения ID: {proof_id}</b>\n\n"
+            f"От пользователя: @{username} (ID: {proof['user_id']})\n"
+            f"Задание: {task_name} (ID: {proof['task_id']})\n"
+            f"Награда за задание: <b>{reward:.6f} BTC</b>\n"
+            f"Текст: {proof['proof_text'] if proof['proof_text'] else 'Нет текста'}\n"
+        )
+        if proof['proof_photo_id']:
+            await bot.send_photo(message.from_user.id, proof['proof_photo_id'], caption=confirmation_text, reply_markup=get_admin_decision_kb(proof_id))
+        else:
+            await message.answer(confirmation_text, reply_markup=get_admin_decision_kb(proof_id))
+
+        await state.set_state(ApproveTaskState.waiting_for_admin_decision)
+    except ValueError:
+        await message.answer("❌ ID подтверждения должен быть числом. Попробуйте еще раз.")
+
+
+@dp.callback_query(ApproveTaskState.waiting_for_admin_decision, F.data.startswith("approve_proof_") | F.data.startswith("reject_proof_"))
+@error_handler_decorator
+async def admin_decision_proof(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id not in ADMIN_IDS:
+        await callback_query.answer("У вас нет прав для этого действия.")
+        return
+
+    action = callback_query.data.split('_')[0]
+    proof_id = int(callback_query.data.split('_')[2])
+    await callback_query.answer() # Отвечаем на callback_query
+
+    proof = await db_get_proof(proof_id)
+    if not proof or proof['status'] != 'pending':
+        await bot.send_message(callback_query.from_user.id, "Это подтверждение уже обработано или не существует.")
+        await state.clear()
+        return
+
+    user_id = proof['user_id']
+    task_id = proof['task_id']
+    task = await db_get_task(task_id)
+    reward = task['reward'] if task else 0.0
+
+    if action == "approve":
+        # Проверяем, не выполнил ли пользователь это задание уже одобренное
+        if await db_has_completed_task(user_id, task_id):
+            await bot.send_message(callback_query.from_user.id, f"⚠️ Пользователь {user_id} уже имеет одобренное выполнение задания {task_id}. Не начислен повторно.")
+            await db_set_proof_status(proof_id, 'rejected') # Помечаем текущее как отклоненное, чтобы не висело
+            await bot.send_message(user_id, f"❌ Ваше подтверждение для задания #{task_id} было отклонено, так как это задание уже было вами успешно выполнено.")
+            await state.clear()
+            return
+
+        await db_set_proof_status(proof_id, 'approved')
+        await db_update_user_balance(user_id, reward)
+        await db_add_completed_task(user_id, task_id) # Добавляем запись о выполненном задании
+
+        await bot.send_message(callback_query.from_user.id, f"✅ Подтверждение ID {proof_id} одобрено. Награда {reward:.6f} BTC начислена пользователю {user_id}.")
+        try:
+            await bot.send_message(user_id, f"🎉 Ваше подтверждение для задания #{task_id} одобрено! На ваш баланс начислено <b>{reward:.6f} BTC</b>.")
+        except TelegramForbiddenError:
+            logger.warning(f"Пользователь {user_id} заблокировал бота.")
+    else: # reject
+        await db_set_proof_status(proof_id, 'rejected')
+        await bot.send_message(callback_query.from_user.id, f"❌ Подтверждение ID {proof_id} отклонено.")
+        try:
+            await bot.send_message(user_id, f"❌ Ваше подтверждение для задания #{task_id} было отклонено. Пожалуйста, внимательно ознакомьтесь с условиями.")
+        except TelegramForbiddenError:
+            logger.warning(f"Пользователь {user_id} заблокировал бота.")
+
+    await state.clear()
+    await bot.send_message(callback_query.from_user.id, "Выберите следующее действие:", reply_markup=get_admin_kb())
+
+
+async def notify_admins_new_proof(proof_id: int, user_id: int, task_id: int):
+    user = await db_get_user(user_id)
+    task = await db_get_task(task_id)
+    username = user['username'] if user and user['username'] else 'Неизвестный пользователь'
+    task_name = task['task_name'] if task else 'Неизвестное задание'
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id,
+                f"🔔 НОВОЕ ПОДТВЕРЖДЕНИЕ ЗАДАНИЯ!\n"
+                f"ID подтверждения: {proof_id}\n"
+                f"От пользователя: @{username} (ID: {user_id})\n"
+                f"Задание: {task_name} (ID: {task_id})\n"
+                f"Нажмите '✅ Проверить задания' в админ-панели, чтобы рассмотреть.",
+                reply_markup=get_admin_kb()
+            )
+        except TelegramForbiddenError:
+            logger.warning(f"Админ {admin_id} заблокировал бота.")
+        except Exception as e:
+            logger.error(f"Ошибка при уведомлении админа {admin_id} о подтверждении: {e}")
+
+
+@dp.message(F.text == "💰 Проверить вывод")
+@error_handler_decorator
+async def admin_check_withdrawals(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    pending_withdrawals = await db_get_pending_withdrawals()
+    if not pending_withdrawals:
+        await message.answer("Нет запросов на вывод, ожидающих проверки.", reply_markup=get_admin_kb())
+        return
+
+    text = "<b>Запросы на вывод, ожидающие проверки:</b>\n\n"
+    for withdraw_req in pending_withdrawals:
+        user = await db_get_user(withdraw_req['user_id'])
+        username = user['username'] if user and user['username'] else 'Неизвестный пользователь'
+        request_date = withdraw_req['request_date'].strftime('%d.%m.%Y %H:%M') if withdraw_req['request_date'] else 'Неизвестно'
+        
+        text += (
+            f"<b>ID запроса:</b> {withdraw_req['withdrawal_id']}\n"
+            f"<b>От пользователя:</b> @{username} (ID: {withdraw_req['user_id']})\n"
+            f"<b>Сумма:</b> {withdraw_req['amount']:.6f if withdraw_req['currency'] == 'BTC' else withdraw_req['amount']:.2f} {withdraw_req['currency']}\n"
+            f"<b>Адрес:</b> <code>{withdraw_req['address']}</code>\n"
+            f"<b>Дата:</b> {request_date}\n"
+            "-----------------------------------\n\n"
+        )
+        
+    await message.answer(text, reply_markup=get_admin_kb())
+    await message.answer("Нажмите на ID запроса для одобрения/отклонения:", reply_markup=get_admin_withdrawal_decision_kb_list(pending_withdrawals))
+
+
+def get_admin_withdrawal_decision_kb_list(pending_withdrawals):
+    builder = InlineKeyboardBuilder()
+    for req in pending_withdrawals:
+        builder.row(InlineKeyboardButton(text=f"Вывод #{req['withdrawal_id']}", callback_data=f"review_withdrawal_{req['withdrawal_id']}"))
+    builder.adjust(2)
+    return builder.as_markup()
+
+@dp.callback_query(F.data.startswith("review_withdrawal_"))
+@error_handler_decorator
+async def admin_review_withdrawal(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id not in ADMIN_IDS:
+        await callback_query.answer("У вас нет прав для этого действия.")
+        return
+    
+    withdrawal_id = int(callback_query.data.split('_')[2])
+    await callback_query.answer()
+
+    withdrawal = await db_get_proof(withdrawal_id) # Это была ошибка, должно быть db_get_withdrawal
+    withdrawal = await db_get_withdrawal_request(withdrawal_id) # Исправлено
+
+    if not withdrawal or withdrawal['status'] != 'pending':
+        await bot.send_message(callback_query.from_user.id, "Этот запрос уже обработан или не существует.")
+        await state.clear()
+        return
+
+    user = await db_get_user(withdrawal['user_id'])
+    username = user['username'] if user and user['username'] else 'Неизвестный пользователь'
+    request_date = withdrawal['request_date'].strftime('%d.%m.%Y %H:%M') if withdrawal['request_date'] else 'Неизвестно'
+
+    text = (
+        f"<b>Подробности запроса на вывод #{withdrawal_id}</b>\n\n"
+        f"От пользователя: @{username} (ID: {withdrawal['user_id']})\n"
+        f"Сумма: {withdrawal['amount']:.6f if withdrawal['currency'] == 'BTC' else withdrawal['amount']:.2f} {withdrawal['currency']}\n"
+        f"Адрес: <code>{withdrawal['address']}</code>\n"
+        f"Дата запроса: {request_date}\n"
+        "Выберите действие:"
+    )
+    await bot.send_message(callback_query.from_user.id, text, reply_markup=get_admin_withdrawal_decision_kb(withdrawal_id))
+
+# Исправленная функция для получения запроса на вывод
+async def db_get_withdrawal_request(withdrawal_id: int):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT withdrawal_id, user_id, amount, currency, address, request_date, status FROM withdrawals WHERE withdrawal_id = $1", withdrawal_id)
+        return dict(row) if row else None
+
+
+@dp.callback_query(F.data.startswith("approve_withdrawal_") | F.data.startswith("reject_withdrawal_"))
+@error_handler_decorator
+async def admin_decision_withdrawal(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id not in ADMIN_IDS:
+        await callback_query.answer("У вас нет прав для этого действия.")
+        return
+
+    action = callback_query.data.split('_')[0]
+    withdrawal_id = int(callback_query.data.split('_')[2])
+    await callback_query.answer() # Отвечаем на callback_query
+
+    withdrawal = await db_get_withdrawal_request(withdrawal_id)
+    if not withdrawal or withdrawal['status'] != 'pending':
+        await bot.send_message(callback_query.from_user.id, "Этот запрос на вывод уже обработан или не существует.")
+        await state.clear()
+        return
+
+    user_id = withdrawal['user_id']
+    amount = withdrawal['amount']
+    currency = withdrawal['currency']
+
+    if action == "approve":
+        await db_set_withdrawal_status(withdrawal_id, 'approved')
+        await bot.send_message(callback_query.from_user.id, f"✅ Запрос на вывод ID {withdrawal_id} одобрен. Пожалуйста, не забудьте произвести фактическую отправку средств.")
+        try:
+            await bot.send_message(user_id, f"🎉 Ваш запрос на вывод {amount:.6f if currency == 'BTC' else amount:.2f} {currency} одобрен! Ожидайте поступления средств на ваш кошелек.")
+        except TelegramForbiddenError:
+            logger.warning(f"Пользователь {user_id} заблокировал бота.")
+    else: # reject
+        await db_set_withdrawal_status(withdrawal_id, 'rejected')
+        # Возвращаем средства на баланс пользователя, если запрос отклонен
+        if currency == "BTC":
+            await db_update_user_balance(user_id, amount)
+        elif currency == "USDT" or currency == "TRC20":
+            await db_update_user_usdt_balance(user_id, amount)
+
+        await bot.send_message(callback_query.from_user.id, f"❌ Запрос на вывод ID {withdrawal_id} отклонен. Средства возвращены на баланс пользователя.")
+        try:
+            await bot.send_message(user_id, f"❌ Ваш запрос на вывод {amount:.6f if currency == 'BTC' else amount:.2f} {currency} был отклонен. Средства возвращены на ваш баланс. Пожалуйста, свяжитесь с администратором для уточнения причин.")
+        except TelegramForbiddenError:
+            logger.warning(f"Пользователь {user_id} заблокировал бота.")
+
+    await state.clear()
+    await bot.send_message(callback_query.from_user.id, "Выберите следующее действие:", reply_markup=get_admin_kb())
+
+
+# Обработчик для всех остальных текстовых сообщений
+@dp.message(F.text)
+@error_handler_decorator
+async def handle_invalid_command(message: types.Message):
+    # Этот обработчик должен быть в конце, чтобы не перехватывать другие команды
+    await message.answer("❌ Неверный формат команды. Пожалуйста, используйте кнопки меню.", reply_markup=get_main_kb())
 
 # =====================
 # ЗАПУСК БОТА
@@ -1839,4 +1841,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Бот остановлен вручную.")
     except Exception as e:
-        logger.error(f"Критическая ошибка запуска бота: {e}")
+        logger.critical(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
