@@ -1752,7 +1752,8 @@ async def check_pending_tasks(message: types.Message):
             
             caption_text = (
                 f"**Заявка ID: {ut['id']}**\n"
-                f'От пользователя: [{user_info.get("full_name", "N/A")}]({f"tg://user?id={ut['user_id']}"})\n'
+                telegram_user_link = f"tg://user?id={ut.get('user_id', 'N/A')}"
+some_variable = f'От пользователя: [{user_info.get("full_name", "N/A")}]({telegram_user_link})\n'
                 f"ID пользователя: `{ut['user_id']}`\n"
                 f"Username: @{user_info.get('username', 'N/A')}\n"
                 f"Задача: `{task_info.get('description', 'N/A')}` (ID: `{ut['task_id']}`)\n"
