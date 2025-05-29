@@ -118,8 +118,6 @@ class DeleteTaskState(StatesGroup):
 
 class TopStates(StatesGroup):
     waiting_top_type = State()
-    waiting_referral_period = State() # Не используется, но оставлено для единообразия
-    waiting_task_period = State()
 
 class EditUserState(StatesGroup):
     waiting_for_id = State()
@@ -309,7 +307,7 @@ async def db_delete_task(task_num: int):
         await conn.execute("DELETE FROM tasks WHERE task_num = $1", task_num)
     finally:
         await conn.close()
-    
+
 # --- CRUD операции для выполненных заданий ---
 async def db_add_task_proof(user_id: int, task_num: int, proof_photo_file_id: str, completion_date: str):
     conn = await get_db_connection()
@@ -329,17 +327,14 @@ async def db_get_user_completed_tasks(user_id: int):
         await conn.close()
     return {r['task_num']: r['completion_date'] for r in rows} # {task_num: completion_date}
 
-async def db_get_all_completed_tasks_with_dates():
+async def db_get_all_completed_tasks_raw():
     conn = await get_db_connection()
     try:
-        rows = await conn.fetch("SELECT user_id, task_num, completion_date FROM task_proofs")
+        # Получаем user_id и task_num
+        rows = await conn.fetch("SELECT user_id, task_num FROM task_proofs")
     finally:
         await conn.close()
-    
-    result = defaultdict(dict)
-    for r in rows:
-        result[r['user_id']][r['task_num']] = r['completion_date']
-    return result
+    return rows # Возвращает список Row-объектов
 
 async def db_get_total_completed_tasks_count():
     conn = await get_db_connection()
@@ -476,7 +471,7 @@ async def get_tasks_kb() -> ReplyKeyboardMarkup:
         if len(current_row) == 2 or i == len(all_tasks) - 1: # По 2 кнопки в ряд или последняя строка
             kb.append(current_row)
             current_row = []
-    
+
     kb.append([KeyboardButton(text="🔙 Назад")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -489,6 +484,7 @@ def get_task_kb(task_num: int) -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+# Упрощенная клавиатура для топов, без выбора периода для заданий
 def get_tops_type_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -498,14 +494,7 @@ def get_tops_type_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-def get_period_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📅 Топ недели"), KeyboardButton(text="📅 Топ месяца")],
-            [KeyboardButton(text="🔙 Назад")]
-        ],
-        resize_keyboard=True
-    )
+# Удалена функция get_period_kb()
 
 def get_tasks_admin_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -533,7 +522,7 @@ async def create_crypto_bot_check(user_id: int, amount_usdt: float) -> dict:
     if not CRYPTO_BOT_TOKEN:
         logger.warning("Crypto Bot API Token не установлен. Невозможно создать чек.")
         return {'ok': False, 'error': {'name': 'Crypto Bot API Token не установлен'}}
-    
+
     headers = {
         'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
         'Content-Type': 'application/json'
@@ -653,7 +642,7 @@ async def process_withdrawal(user_id: int, amount_zb: int):
     # Уменьшаем баланс только после успешного создания чека
     new_balance = user_data['balance'] - amount_zb
     await db_update_user_balance(user_id, new_balance)
-    
+
     return True, check_response['result']['bot_check_url']
 
 async def process_deposit(user_id: int, amount_usdt: float):
@@ -1197,7 +1186,7 @@ async def tops_handler(message: types.Message, state: FSMContext, **kwargs):
 @check_not_blocked
 async def top_referrals_handler(message: types.Message, state: FSMContext, **kwargs):
     top_users_data = await db_get_all_users_with_referral_count()
-    
+
     # Сортируем по количеству рефералов в убывающем порядке
     top_users_data.sort(key=lambda x: x[2], reverse=True)
 
@@ -1208,7 +1197,7 @@ async def top_referrals_handler(message: types.Message, state: FSMContext, **kwa
         for i, (user_id, username, count) in enumerate(top_users_data[:10], 1): # Топ-10
             username_str = f"@{username}" if username else f"ID: `{user_id}`"
             result += f"{i}. {username_str} - **{count}** рефералов\n"
-    
+
     await message.answer(result, parse_mode="Markdown", reply_markup=get_tops_type_kb())
     await state.clear()
 
@@ -1216,59 +1205,46 @@ async def top_referrals_handler(message: types.Message, state: FSMContext, **kwa
 @dp.message(TopStates.waiting_top_type, F.text == "🏆 Топы заданий")
 @check_not_blocked
 async def top_tasks_handler(message: types.Message, state: FSMContext, **kwargs):
-    await message.answer("📈 Выберите период для топа заданий:", reply_markup=get_period_kb())
-    await state.set_state(TopStates.waiting_task_period)
-
-@dp.message(TopStates.waiting_task_period, F.text == "📅 Топ недели")
-@check_not_blocked
-async def top_tasks_week(message: types.Message, state: FSMContext, **kwargs):
-    result = await get_top_completed_tasks('week')
+    # Теперь эта функция сразу показывает топ заданий без выбора периода
+    result = await get_top_completed_tasks_all_time()
     await message.answer(result, parse_mode="Markdown", reply_markup=get_tops_type_kb())
     await state.clear()
 
-@dp.message(TopStates.waiting_task_period, F.text == "📅 Топ месяца")
-@check_not_blocked
-async def top_tasks_month(message: types.Message, state: FSMContext, **kwargs):
-    result = await get_top_completed_tasks('month')
-    await message.answer(result, parse_mode="Markdown", reply_markup=get_tops_type_kb())
-    await state.clear()
+# Новая функция для получения топа выполненных заданий за все время
+async def get_top_completed_tasks_all_time():
+    all_completed_tasks_raw = await db_get_all_completed_tasks_raw()
 
-async def get_top_completed_tasks(period: str):
-    all_completed_tasks = await db_get_all_completed_tasks_with_dates()
-    
-    now = datetime.now()
-    if period == 'week':
-        start_date = now - timedelta(weeks=1)
-    elif period == 'month':
-        start_date = now - timedelta(days=30) # Приближенно месяц
-    else:
-        return "Неверный период."
+    # Считаем количество выполненных заданий для каждого пользователя
+    user_task_counts = defaultdict(int)
+    for row in all_completed_tasks_raw:
+        user_task_counts[row['user_id']] += 1
 
-    top_users = [] # (user_id, count, username)
+    final_top_users = [] # (user_id, count, username)
+    # Оптимизация: получаем данные о пользователях один раз
+    all_users_data = {}
+    user_ids_in_top = list(user_task_counts.keys())
+    if user_ids_in_top:
+        conn = await get_db_connection()
+        try:
+            # Получаем все usernames для пользователей, которые выполнили задания
+            rows = await conn.fetch("SELECT user_id, username FROM users WHERE user_id = ANY($1)", user_ids_in_top)
+            for row in rows:
+                all_users_data[row['user_id']] = {'username': row['username']}
+        finally:
+            await conn.close()
 
-    for user_id, tasks_by_user in all_completed_tasks.items():
-        count = 0
-        for task_num, completion_date_str in tasks_by_user.items():
-            try:
-                task_date = datetime.strptime(completion_date_str, '%d.%m.%Y %H:%M')
-                if task_date >= start_date:
-                    count += 1
-            except ValueError:
-                logger.warning(f"Не удалось распарсить дату {completion_date_str} для пользователя {user_id}, задания {task_num}")
-                continue # Пропускаем некорректные даты
 
-        if count > 0:
-            user_data = await db_get_user(user_id)
-            username = user_data.get('username', '—') if user_data else '—'
-            top_users.append((user_id, count, username))
+    for user_id, count in user_task_counts.items():
+        username = all_users_data.get(user_id, {}).get('username', '—')
+        final_top_users.append((user_id, count, username))
 
-    top_users.sort(key=lambda x: x[1], reverse=True)
+    final_top_users.sort(key=lambda x: x[1], reverse=True)
 
-    if not top_users:
-        return f"🏆 **Топ заданий пуст за выбранный период ({'неделю' if period == 'week' else 'месяц'}).**"
+    if not final_top_users:
+        return "🏆 **Топ заданий пуст.**"
 
-    result = f"🏆 **Топ заданий за {'неделю' if period == 'week' else 'месяц'}:**\n\n"
-    for i, (user_id, count, username) in enumerate(top_users[:10], 1):
+    result = "🏆 **Топ заданий (всего):**\n\n"
+    for i, (user_id, count, username) in enumerate(final_top_users[:10], 1): # Топ-10
         username_str = f"@{username}" if username else f"ID: `{user_id}`"
         result += f"{i}. {username_str} - **{count}** заданий\n"
 
@@ -1361,7 +1337,7 @@ async def list_users(message: types.Message):
             balance = user_data.get('balance', 0.0)
             referrals = await db_get_referrals_count(user_id)
             users_info.append(f"ID: `{user_id}`, @{username}, Баланс: {balance:.2f}, Рефералов: {referrals}")
-    
+
     # Ограничиваем количество пользователей, если их слишком много
     if len(users_info) > 50:
         await message.answer(
@@ -1394,10 +1370,10 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
 
     broadcast_text = message.html_text # Сохраняем форматирование
     all_user_ids = await db_get_all_user_ids()
-    
+
     sent_count = 0
     blocked_count = 0
-    
+
     for user_id in all_user_ids:
         try:
             await bot.send_message(user_id, broadcast_text, parse_mode="HTML")
@@ -1594,7 +1570,7 @@ async def process_edit_user_id(message: types.Message, state: FSMContext):
             await message.answer("❌ Пользователь с таким ID не найден.", reply_markup=get_admin_kb())
             await state.clear()
             return
-        
+
         await state.update_data(edit_user_id=user_id_to_edit)
         await message.answer(
             f"Выбран пользователь ID: `{user_id_to_edit}` (@{user_data.get('username', '—')}).\n"
@@ -1660,12 +1636,12 @@ async def process_edit_user_value(message: types.Message, state: FSMContext):
 async def export_data(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    
+
     await message.answer("Начинаю экспорт данных. Это может занять некоторое время...")
 
     try:
         users_raw_data = await db_get_users_for_export()
-        
+
         # Подготовка данных для DataFrame
         columns = [
             "ID Пользователя",
@@ -1676,7 +1652,7 @@ async def export_data(message: types.Message):
             "Выполненные Задания (номера)",
             "Даты Выполнения Заданий"
         ]
-        
+
         df = pd.DataFrame(users_raw_data, columns=columns)
 
         # Сохранение в Excel
