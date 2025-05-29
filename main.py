@@ -26,7 +26,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import os
-TOKEN = os.environ.get("7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw")
+TOKEN = os.environ.get("7740361367:AAGRCf2fp22eCvA7Iu8d4IdDdfQESYd9AzE")
 import threading
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -47,7 +47,7 @@ threading.Thread(target=run_fake_server).start()
  
  
  # === НАСТРОЙКИ БОТА ===
-API_TOKEN = '7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw'
+API_TOKEN = '7740361367:AAGRCf2fp22eCvA7Iu8d4IdDdfQESYd9AzE'
 ADMIN_IDS = [1041720539, 6216901034]
 CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQ0V3YNV4O0GHcWTvSbzkEar43'
 CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
