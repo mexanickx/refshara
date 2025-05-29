@@ -627,7 +627,7 @@ def get_tasks_kb():
         keyboard=[
             [KeyboardButton(text="➡️ Выполнить задание"), KeyboardButton(text="Мои выполненные задания")],
             [KeyboardButton(text="🏆 Топ заданий")],
-            [KeyboardButton(text:"⬅️ Назад")]
+            [KeyboardButton(text="⬅️ Назад")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
