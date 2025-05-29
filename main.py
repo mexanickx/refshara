@@ -26,7 +26,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import os
-TOKEN = os.environ.get("7740361367:AAGRCf2fp22eCvA7Iu8d4IdDdfQESYd9AzE")
+TOKEN = os.environ.get("7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw")
 import threading
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -47,7 +47,7 @@ threading.Thread(target=run_fake_server).start()
  
  
  # === НАСТРОЙКИ БОТА ===
-API_TOKEN = '7740361367:AAGRCf2fp22eCvA7Iu8d4IdDdfQESYd9AzE'
+API_TOKEN = '7740361367:AAH4bGWWbUNYzy_LcAuK2SvoZ474gPPPXaw'
 ADMIN_IDS = [1041720539, 6216901034]
 CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQ0V3YNV4O0GHcWTvSbzkEar43'
 CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
@@ -1278,21 +1278,12 @@ async def get_referral_top(period: str = "week") -> str:
      top_users = []
  
      for user_id, user_data in users.items():
-         if 'reg_date' not in user_data:
-             continue
+         # No need to check 'reg_date' for the current user for top calculation.
+         # The 'referrals' list already represents the count of invited users.
+         referral_count = len(user_data.get('referrals', []))
  
-         reg_date = datetime.strptime(user_data['reg_date'], '%d.%m.%Y %H:%M')
-         if reg_date < start_date:
-             continue
- 
-         referrals = [
-             ref_id for ref_id in user_data.get('referrals', []) 
-             if ref_id in users and 
-             datetime.strptime(users[ref_id]['reg_date'], '%d.%m.%Y %H:%M') >= start_date
-         ]
- 
-         if referrals:
-             top_users.append((user_id, len(referrals), user_data.get('username', '—')))
+         if referral_count > 0:
+             top_users.append((user_id, referral_count, user_data.get('username', '—')))
  
      top_users.sort(key=lambda x: x[1], reverse=True)
  
