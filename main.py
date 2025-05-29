@@ -25,6 +25,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.default import DefaultBotProperties # <-- Эту строку добавили/изменили
 
 # Импорты для базы данных PostgreSQL
 import asyncpg
@@ -59,7 +60,8 @@ if not CRYPTO_BOT_TOKEN:
 
 
 # --- ИНИЦИАЛИЗАЦИЯ БОТА И ДИСПЕТЧЕРА ---
-bot = Bot(API_TOKEN, parse_mode='HTML') # Используем HTML для форматирования
+# Инициализация Bot с использованием DefaultBotProperties для parse_mode
+bot = Bot(API_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher(storage=MemoryStorage())
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ И НАСТРОЙКИ ---
@@ -85,6 +87,8 @@ class Form(StatesGroup):
     waiting_for_delete_task_number = State()
     waiting_for_task_id_for_approve = State()
     waiting_for_proof_photo_for_approve = State()
+    btc_address = State()
+    trc20_address = State()
 
 
 class WithdrawState(StatesGroup):
@@ -167,7 +171,7 @@ async def init_db():
                     reg_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                     balance REAL DEFAULT 0.0,
                     last_mine_time TIMESTAMP WITH TIME ZONE,
-                    referral_count INTEGER DEFAULT 0, -- Убедитесь, что этот столбец есть!
+                    referral_count INTEGER DEFAULT 0,
                     referrer_id BIGINT,
                     invited_users TEXT DEFAULT '[]',
                     mining_level INTEGER DEFAULT 1,
@@ -627,7 +631,7 @@ def get_tasks_kb():
         keyboard=[
             [KeyboardButton(text="➡️ Выполнить задание"), KeyboardButton(text="Мои выполненные задания")],
             [KeyboardButton(text="🏆 Топ заданий")],
-            [KeyboardButton(text="⬅️ Назад")]
+            [KeyboardButton(text:"⬅️ Назад")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
@@ -700,7 +704,7 @@ def get_admin_withdrawal_decision_kb(withdrawal_id: int):
 def get_back_to_main_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="⬅️ Назад")]
+            [KeyboardButton(text="⬅️ Назад")] # <-- Исправленная строка
         ],
         resize_keyboard=True,
         one_time_keyboard=True # Часто удобно, чтобы она скрывалась после использования
@@ -1142,7 +1146,7 @@ async def process_trc20_address(message: types.Message, state: FSMContext):
     trc20_address = message.text.strip()
     # TRC20 адреса начинаются с 'T' и имеют длину 34 символа
     if not trc20_address.startswith('T') or len(trc20_address) != 34:
-        await message.answer("❌ Похоже на неверный TRC20 адрес (должен начинаться с 'T' и быть 34 символа). Пожалуйста, попробуйте еще раз.")
+        await message.answer("❌ Похоже на неверный TRC20 адрес (должен начинаться с 'T' и быть 34 символа). Попробуйте еще раз.")
         return
 
     await db_update_user_trc20_address(message.from_user.id, trc20_address)
@@ -1742,8 +1746,7 @@ async def admin_review_withdrawal(callback_query: types.CallbackQuery, state: FS
     withdrawal_id = int(callback_query.data.split('_')[2])
     await callback_query.answer()
 
-    withdrawal = await db_get_proof(withdrawal_id) # Это была ошибка, должно быть db_get_withdrawal
-    withdrawal = await db_get_withdrawal_request(withdrawal_id) # Исправлено
+    withdrawal = await db_get_withdrawal_request(withdrawal_id)
 
     if not withdrawal or withdrawal['status'] != 'pending':
         await bot.send_message(callback_query.from_user.id, "Этот запрос уже обработан или не существует.")
@@ -1764,7 +1767,7 @@ async def admin_review_withdrawal(callback_query: types.CallbackQuery, state: FS
     )
     await bot.send_message(callback_query.from_user.id, text, reply_markup=get_admin_withdrawal_decision_kb(withdrawal_id))
 
-# Исправленная функция для получения запроса на вывод
+# Функция для получения запроса на вывод
 async def db_get_withdrawal_request(withdrawal_id: int):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
