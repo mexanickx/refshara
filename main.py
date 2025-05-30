@@ -143,7 +143,7 @@ def get_admin_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🧾 Список пользователей")],
-             [KeyboardButton(text="📨 Рассылка"), Keyboard(text="💼 Задания")],
+             [KeyboardButton(text="📨 Рассылка"), KeyboardButton(text="💼 Задания")], # Corrected from Keyboard to KeyboardButton
              [KeyboardButton(text="🚫 Заблокировать"), KeyboardButton(text="🔓 Разблокировать")],
              [KeyboardButton(text="✏️ Редактировать пользователя")],
              [KeyboardButton(text="📥 Экспорт данных")],
@@ -248,7 +248,8 @@ async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
          'amount': str(amount_usdt),
          'description': f'Пополнение баланса пользователя {user_id}',
          'payload': str(user_id),
-         'allow_anonymous': False
+         'allow_anonymous': False,
+         'compact': True # Added for compact mode
      }
  
      try:
@@ -260,11 +261,6 @@ async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
          )
          response_data = response.json()
          print("Crypto Bot API Response:", response_data)
-         
-         # Append '=compac' to the pay_url if it exists
-         if response_data.get('ok') and 'pay_url' in response_data['result']:
-             response_data['result']['pay_url'] = response_data['result']['pay_url'] + '=compac'
- 
          return response_data
      except Exception as e:
          print(f"Error creating invoice: {e}")
