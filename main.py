@@ -249,7 +249,7 @@ async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
          'description': f'Пополнение баланса пользователя {user_id}',
          'payload': str(user_id),
          'allow_anonymous': False,
-         'compact': True # Added for compact mode
+         'compact': True # This parameter is already set to True in your provided code
      }
  
      try:
