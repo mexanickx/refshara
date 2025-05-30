@@ -143,7 +143,7 @@ def get_admin_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
              [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🧾 Список пользователей")],
-             [KeyboardButton(text="📨 Рассылка"), KeyboardButton(text="💼 Задания")], # Corrected from Keyboard to KeyboardButton
+             [KeyboardButton(text="📨 Рассылка"), KeyboardButton(text="💼 Задания")],
              [KeyboardButton(text="🚫 Заблокировать"), KeyboardButton(text="🔓 Разблокировать")],
              [KeyboardButton(text="✏️ Редактировать пользователя")],
              [KeyboardButton(text="📥 Экспорт данных")],
@@ -199,7 +199,7 @@ def get_tasks_admin_kb() -> ReplyKeyboardMarkup:
 def get_edit_user_kb() -> ReplyKeyboardMarkup:
      return ReplyKeyboardMarkup(
          keyboard=[
-             [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👥 Рефералы")],
+             [KeyboardButton(text="💰 Баланс"), Keyboard(text="👥 Рефералы")],
              [KeyboardButton(text="✅ Выполнено заданий"), KeyboardButton(text="🔙 Назад")]
          ],
          resize_keyboard=True
@@ -249,7 +249,7 @@ async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
          'description': f'Пополнение баланса пользователя {user_id}',
          'payload': str(user_id),
          'allow_anonymous': False,
-         'compact': True # This parameter is already set to True in your provided code
+         'compact': True # This is here to request compact mode, but we will construct the URL manually.
      }
  
      try:
@@ -330,12 +330,15 @@ async def process_deposit(user_id: int, amount_usdt: float):
      if not invoice.get('result'):
          return False, "Платежная система не предоставила данные для оплаты"
  
-     if 'pay_url' not in invoice['result']:
-         return False, "Платежная система не предоставила ссылку для оплаты"
+     # Get the invoice_id from the result
+     invoice_id = invoice['result']['invoice_id']
+
+     # Manually construct the desired compact URL
+     compact_pay_url = f"https://t.me/CryptoBot/app?startapp=invoice-{invoice_id}&mode=compact"
  
      return True, {
-         'pay_url': invoice['result']['pay_url'],
-         'invoice_id': invoice['result']['invoice_id']
+         'pay_url': compact_pay_url, # Use the manually constructed URL
+         'invoice_id': invoice_id
      }
  
  # =====================
