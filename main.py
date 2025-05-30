@@ -30,12 +30,10 @@ import os
 # Import for the fake server
 from aiohttp import web
 
-TOKEN = os.environ.get("7740361367:AAGAnKLBl9G_2ooB7UbIpAiOB5YfUzsw9fs") # Ensure this is properly set as an environment variable on Render
-
-# === НАСТРОЙКИ БОТА ===
-API_TOKEN = '7740361367:AAGAnKLBl9G_2ooB7UbIpAiOB5YfUzsw9fs' # Consider using os.environ.get for this too
-ADMIN_IDS = [1041720539, 6216901034]
-CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQV3YNV4O0GHcWTvSbzkEar43' # Consider using os.environ.get for this too
+# ТОКЕНЫ И НАСТРОЙКИ (обязательно настройте эти переменные окружения на Render)
+API_TOKEN = os.environ.get('TELEGRAM_BOT_API_TOKEN', '7740361367:AAGAnKLBl9G_2ooB7UbIpAiOB5YfUzsw9fs') # Используйте переменную окружения
+ADMIN_IDS = [1041720539, 6216901034] # Ваши ID администраторов
+CRYPTO_BOT_TOKEN = os.environ.get('CRYPTO_BOT_API_TOKEN', '369438:AAEKsbWPZPQV3YNV4O0GHcWTvSbzkEar43') # Используйте переменную окружения
 CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
 
 # Константы майнинга
@@ -1339,6 +1337,11 @@ async def run_bot():
          try:
              print("Запуск бота в режиме polling...")
              await dp.start_polling(bot, skip_updates=True)
+         except TelegramForbiddenError as e:
+             # Логируем ошибку, если бот заблокирован пользователем
+             print(f"Ошибка: Бот был заблокирован пользователем. {e}")
+             # Можно добавить логику для удаления пользователя из списка активных, если это необходимо
+             await asyncio.sleep(5) # Ждем немного перед следующей попыткой или просто продолжаем
          except Exception as e:
              print(f"Ошибка в работе бота: {e}")
              print("Перезапуск через 10 секунд...")
@@ -1349,24 +1352,30 @@ async def fake_server_handler(request):
     return web.Response(text="Bot is running!")
 
 async def start_fake_server():
-    port = int(os.environ.get("PORT", 10000))
+    # Render предоставляет порт через переменную окружения PORT
+    port = int(os.environ.get("PORT", 10000)) 
     app = web.Application()
     app.router.add_get('/', fake_server_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    # Привязываем к '0.0.0.0' для доступности извне контейнера
+    site = web.TCPSite(runner, '0.0.0.0', port) 
     await site.start()
     print(f"Fake web server running on port {port}")
-    # Keep the server running indefinitely
+    # Держим сервер запущенным бесконечно
     while True:
-        await asyncio.sleep(3600) # Sleep for an hour
+        await asyncio.sleep(3600) # Спим час, чтобы не потреблять CPU циклы постоянно
 
 async def main():
-    # Run both the bot polling and the fake server concurrently
+    # Запускаем бота и фейковый сервер параллельно
     await asyncio.gather(
         run_bot(),
         start_fake_server()
     )
 
 if __name__ == "__main__":
+    # Установите переменные окружения, если запускаете локально
+    # os.environ['TELEGRAM_BOT_API_TOKEN'] = 'ВАШ_ТОКЕН_БОТА'
+    # os.environ['CRYPTO_BOT_API_TOKEN'] = 'ВАШ_ТОКЕН_КРИПТО_БОТА'
+    
     asyncio.run(main())
