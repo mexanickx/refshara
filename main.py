@@ -5,20 +5,20 @@ import pandas as pd
 import io
 import logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+     level=logging.INFO
+ )
 import requests
 from datetime import datetime, timedelta
 from collections import defaultdict
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import (
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    BufferedInputFile
-)
+     ReplyKeyboardMarkup,
+     KeyboardButton,
+     InlineKeyboardMarkup,
+     InlineKeyboardButton,
+     BufferedInputFile
+ )
 from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -30,904 +30,1337 @@ TOKEN = os.environ.get("7740361367:AAGAnKLBl9G_2ooB7UbIpAiOB5YfUzsw9fs")
 import threading
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
-# запускаем фейковый сервер, чтобы Render не ругался
+ 
+ # запускаем фейковый сервер, чтобы Render не ругался
 def run_fake_server():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'Bot is running!')
-
-    server_address = ('0.0.0.0', 10000)
-    httpd = HTTPServer(server_address, Handler)
-    print(f"Запускаем фейковый сервер на порту {server_address[1]}")
-    httpd.serve_forever()
-
-threading.Thread(target=run_fake_server, daemon=True).start()
-
-# Замените на ваш токен бота и токен Crypto Bot API
-# BOT_TOKEN = os.environ.get('BOT_TOKEN') # Замените на ваш токен бота
-BOT_TOKEN = "7740361367:AAGAnKLBl9G_2ooB7UbIpAiOB5YfUzsw9fs" # Замените на ваш токен бота
-CRYPTO_BOT_TOKEN = "15372:AAyD0R4vM9Ld1qF2V3yqfE55L17e7Ff92g3tN" # Замените на ваш токен Crypto Bot API
-CRYPTO_BOT_API_URL = "https://pay.crypt.bot/api/"
-
-# Инициализация бота и диспетчера
-bot = Bot(token=BOT_TOKEN)
+     class Handler(BaseHTTPRequestHandler):
+         def do_GET(self):
+             self.send_response(200)
+             self.end_headers()
+             self.wfile.write(b'Bot is running!')
+ 
+     port = int(os.environ.get("PORT", 10000))
+     server = HTTPServer(('0.0.0.0', port), Handler)
+     print(f"Fake web server running on port {port}")
+     server.serve_forever()
+threading.Thread(target=run_fake_server).start()
+ 
+ 
+ # === НАСТРОЙКИ БОТА ===
+API_TOKEN = '7740361367:AAGAnKLBl9G_2ooB7UbIpAiOB5YfUzsw9fs'
+ADMIN_IDS = [1041720539, 6216901034]
+CRYPTO_BOT_TOKEN = '369438:AAEKsbWPZPQ0V3YNV4O0GHcWTvSbzkEar43'
+CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
+ 
+ # Константы майнинга
+MINING_COOLDOWN = 3600  # 1 час в секундах
+MINING_REWARD_RANGE = (3, 3)  # Диапазон награды
+TASK_REWARD_RANGE = (5, 10)  # Награда за задание
+REFERRAL_REWARD = 3  # Награда за приглашенного реферала
+MIN_WITHDRAWAL = 0.05  # Минимальная сумма вывода в USDT
+ZB_EXCHANGE_RATE = 0.01  # Курс 1 Zebranium = 0.01 USDT
+ 
+ # Инициализация бота и диспетчера
+bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
-# =====================
-# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
-# =====================
-users = {}  # Словарь для хранения информации о пользователях
-tasks = {}  # Словарь для хранения заданий
-invoices_in_progress = {} # {invoice_id: user_id}
-
-# =====================
-# ХЭНДЛЕРЫ КОМАНД
-# =====================
-
-@dp.message(CommandStart())
-async def send_welcome(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in users:
-        users[user_id] = {
-            'username': message.from_user.username if message.from_user.username else f"id{user_id}",
-            'balance': 0.0,
-            'reg_date': datetime.now().strftime('%d.%m.%Y %H:%M')
-        }
-        await save_data()
-    await message.reply("Привет! Я ваш бот для управления задачами и балансом. Используйте меню для навигации.")
-    await show_main_menu(message)
-
-# =====================
-# ГЛАВНОЕ МЕНЮ И КНОПКИ
-# =====================
-
-async def show_main_menu(message: types.Message):
-    markup = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🗂 Мои задания")],
-            [KeyboardButton(text="💰 Пополнить баланс"), KeyboardButton(text="💸 Вывести средства")],
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Профиль")]
-        ],
-        resize_keyboard=True
-    )
-    await message.answer("Выберите действие:", reply_markup=markup)
-
-@dp.message(F.text == "Вернуться в главное меню")
-async def back_to_main_menu(message: types.Message):
-    await show_main_menu(message)
-
-# =====================
-# СОСТОЯНИЯ ДЛЯ FSM
-# =====================
-
-class CreateTask(StatesGroup):
-    waiting_for_task_description = State()
-    waiting_for_task_price = State()
-
-class Deposit(StatesGroup):
-    waiting_for_deposit_amount = State()
-
-class Withdraw(StatesGroup):
-    waiting_for_withdraw_amount = State()
-    waiting_for_wallet_address = State()
-
-class CompleteTask(StatesGroup):
-    waiting_for_task_id_to_complete = State()
-
-class ChooseRatingPeriod(StatesGroup):
-    waiting_for_period_selection = State()
-
-# =====================
-# ХЭНДЛЕРЫ ТЕКСТОВЫХ КНОПОК
-# =====================
-
-@dp.message(F.text == "🗂 Мои задания")
-async def my_tasks_handler(message: types.Message):
-    keyboard = InlineKeyboardBuilder()
-    keyboard.add(InlineKeyboardButton(text="➕ Создать задание", callback_data="create_task"))
-    keyboard.add(InlineKeyboardButton(text="📝 Доступные задания", callback_data="show_available_tasks"))
-    keyboard.add(InlineKeyboardButton(text="✅ Завершить задание", callback_data="complete_task"))
-    await message.answer("Управление заданиями:", reply_markup=keyboard.as_markup())
-
-@dp.message(F.text == "💰 Пополнить баланс")
-async def deposit_handler(message: types.Message, state: FSMContext):
-    await message.answer("Введите сумму пополнения в USDT (например, 1.0):")
-    await state.set_state(Deposit.waiting_for_deposit_amount)
-
-@dp.message(F.text == "💸 Вывести средства")
-async def withdraw_handler(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    balance = users.get(user_id, {}).get('balance', 0.0)
-    await message.answer(f"Ваш текущий баланс: {balance:.2f} USDT. Введите сумму для вывода:")
-    await state.set_state(Withdraw.waiting_for_withdraw_amount)
-
-@dp.message(F.text == "📊 Статистика")
-async def stats_handler(message: types.Message):
-    keyboard = InlineKeyboardBuilder()
-    keyboard.add(InlineKeyboardButton(text="🏆 Топ заданий", callback_data="top_tasks"))
-    await message.answer("Статистика:", reply_markup=keyboard.as_markup())
-
-@dp.message(F.text == "⚙️ Профиль")
-async def profile_handler(message: types.Message):
-    user_id = message.from_user.id
-    user_data = users.get(user_id, {})
-    username = user_data.get('username', '—')
-    balance = user_data.get('balance', 0.0)
-    reg_date = user_data.get('reg_date', '—')
-    num_created_tasks = sum(1 for task_id, task in tasks.items() if task['creator_id'] == user_id)
-    num_completed_tasks = sum(1 for task_id, task in tasks.items() if task.get('executor_id') == user_id and task['status'] == 'completed')
-
-    await message.answer(
-        f"👤 Ваш профиль:\n\n"
-        f"ID: `{user_id}`\n"
-        f"Имя пользователя: @{username}\n"
-        f"Баланс: {balance:.2f} USDT\n"
-        f"Дата регистрации: {reg_date}\n"
-        f"Создано заданий: {num_created_tasks}\n"
-        f"Выполнено заданий: {num_completed_tasks}",
-        parse_mode="Markdown"
-    )
-
-# =====================
-# ОБРАБОТКА КОЛЛБЭКОВ (ИНЛАЙН КНОПКИ)
-# =====================
-
-@dp.callback_query(F.data == "create_task")
-async def start_create_task(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите описание задания:")
-    await state.set_state(CreateTask.waiting_for_task_description)
-    await callback.answer()
-
-@dp.callback_query(F.data == "show_available_tasks")
-async def show_available_tasks(callback: types.CallbackQuery):
-    available_tasks = [task for task_id, task in tasks.items() if task['status'] == 'available' and task['creator_id'] != callback.from_user.id]
-    if not available_tasks:
-        await callback.message.answer("Нет доступных заданий.")
-        return
-
-    for task_id, task in available_tasks:
-        creator_username = users.get(task['creator_id'], {}).get('username', f"id{task['creator_id']}")
-        keyboard = InlineKeyboardBuilder()
-        keyboard.add(InlineKeyboardButton(text="🤝 Взять задание", callback_data=f"take_task_{task_id}"))
-        await callback.message.answer(
-            f"📝 Задание ID: {task_id}\n"
-            f"Описание: {task['description']}\n"
-            f"Цена: {task['price']:.2f} USDT\n"
-            f"Создатель: @{creator_username}",
-            reply_markup=keyboard.as_markup()
-        )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith('take_task_'))
-async def take_task_callback(callback: types.CallbackQuery):
-    task_id = callback.data.split('_')[2]
-    user_id = callback.from_user.id
-
-    if task_id not in tasks or tasks[task_id]['status'] != 'available':
-        await callback.message.answer("Это задание уже недоступно или не существует.")
-        await callback.answer()
-        return
-
-    if tasks[task_id]['creator_id'] == user_id:
-        await callback.message.answer("Вы не можете взять собственное задание.")
-        await callback.answer()
-        return
-
-    tasks[task_id]['status'] = 'in_progress'
-    tasks[task_id]['executor_id'] = user_id
-    tasks[task_id]['taken_date'] = datetime.now().strftime('%d.%m.%Y %H:%M')
-    await save_data()
-
-    creator_id = tasks[task_id]['creator_id']
-    creator_username = users.get(creator_id, {}).get('username', f"id{creator_id}")
-
-    try:
-        await bot.send_message(creator_id,
-                               f"🔔 Ваше задание '{tasks[task_id]['description']}' (ID: {task_id}) было взято пользователем @{callback.from_user.username} (ID: {user_id}).")
-    except TelegramForbiddenError:
-        print(f"Не удалось отправить уведомление пользователю {creator_id}. Бот заблокирован.")
-
-    await callback.message.answer(f"Вы взяли задание ID: {task_id}. Удачи!")
-    await callback.answer()
-
-@dp.callback_query(F.data == "complete_task")
-async def start_complete_task(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    in_progress_tasks = [task_id for task_id, task in tasks.items() if task.get('executor_id') == user_id and task['status'] == 'in_progress']
-
-    if not in_progress_tasks:
-        await callback.message.answer("У вас нет заданий в процессе выполнения.")
-        await callback.answer()
-        return
-
-    response_text = "Ваши задания в процессе выполнения:\n\n"
-    for task_id in in_progress_tasks:
-        task = tasks[task_id]
-        response_text += f"ID: {task_id}\nОписание: {task['description']}\nЦена: {task['price']:.2f} USDT\n\n"
-
-    response_text += "Введите ID задания, которое вы хотите завершить:"
-    await callback.message.answer(response_text)
-    await state.set_state(CompleteTask.waiting_for_task_id_to_complete)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "top_tasks")
-async def choose_top_period(callback: types.CallbackQuery, state: FSMContext):
-    keyboard = InlineKeyboardBuilder()
-    keyboard.add(InlineKeyboardButton(text="📈 За неделю", callback_data="top_tasks_week"))
-    keyboard.add(InlineKeyboardButton(text="📈 За месяц", callback_data="top_tasks_month"))
-    await callback.message.answer("Выберите период для топа заданий:", reply_markup=keyboard.as_markup())
-    await state.set_state(ChooseRatingPeriod.waiting_for_period_selection)
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data and c.data.startswith('top_tasks_'), state=ChooseRatingPeriod.waiting_for_period_selection)
-async def show_top_tasks_period(callback: types.CallbackQuery, state: FSMContext):
-    period = callback.data.split('_')[2] # 'week' or 'month'
-    result_message = get_top_users_by_completed_tasks(period)
-    await callback.message.answer(result_message, parse_mode="Markdown")
-    await state.clear()
-    await callback.answer()
-
-# =====================
-# ХЭНДЛЕРЫ СОСТОЯНИЙ (FSM)
-# =====================
-
-@dp.message(CreateTask.waiting_for_task_description)
-async def process_task_description(message: types.Message, state: FSMContext):
-    await state.update_data(description=message.text)
-    await message.answer("Теперь введите цену задания в USDT (например, 1.5):")
-    await state.set_state(CreateTask.waiting_for_task_price)
-
-@dp.message(CreateTask.waiting_for_task_price)
-async def process_task_price(message: types.Message, state: FSMContext):
-    try:
-        price = float(message.text.replace(',', '.'))
-        if price <= 0:
-            await message.answer("Цена должна быть положительным числом. Пожалуйста, введите корректную цену:")
-            return
-        
-        user_id = message.from_user.id
-        if users[user_id]['balance'] < price:
-            await message.answer(f"Недостаточно средств на балансе ({users[user_id]['balance']:.2f} USDT). Пополните баланс.")
-            await state.clear()
-            await show_main_menu(message)
-            return
-
-        data = await state.get_data()
-        description = data['description']
-        task_id = str(random.randint(100000, 999999))
-        tasks[task_id] = {
-            'creator_id': user_id,
-            'description': description,
-            'price': price,
-            'status': 'available',
-            'created_date': datetime.now().strftime('%d.%m.%Y %H:%M')
-        }
-        users[user_id]['balance'] -= price # Списываем средства при создании
-        await save_data()
-
-        await message.answer(f"✅ Задание создано! ID: {task_id}\nОписание: {description}\nЦена: {price:.2f} USDT. Средства заморожены до выполнения задания.")
-        await state.clear()
-        await show_main_menu(message)
-    except ValueError:
-        await message.answer("Некорректная сумма. Пожалуйста, введите число (например, 1.5):")
-
-
-@dp.message(Deposit.waiting_for_deposit_amount)
-async def process_deposit_amount(message: types.Message, state: FSMContext):
-    try:
-        amount = float(message.text.replace(',', '.'))
-        if amount <= 0:
-            await message.answer("Сумма пополнения должна быть положительным числом. Пожалуйста, введите корректную сумму:")
-            return
-
-        user_id = message.from_user.id
-        success, result = await process_deposit(user_id, amount)
-
-        if success:
-            pay_url = result['pay_url']
-            invoice_id = result['invoice_id']
-            invoices_in_progress[invoice_id] = user_id # Сохраняем user_id для проверки
-            await message.answer(
-                f"✅ Счет на оплату создан!\n"
-                f"Сумма: {amount:.2f} USDT\n"
-                f"Для оплаты перейдите по ссылке: {pay_url}\n\n"
-                f"После оплаты баланс будет зачислен автоматически."
-            )
-            logging.info(f"Generated invoice for user {user_id}: {pay_url}")
-        else:
-            await message.answer(f"Ошибка при создании счета: {result}")
-        await state.clear()
-        await show_main_menu(message)
-    except ValueError:
-        await message.answer("Некорректная сумма. Пожалуйста, введите число (например, 1.0):")
-
-
-@dp.message(Withdraw.waiting_for_withdraw_amount)
-async def process_withdraw_amount(message: types.Message, state: FSMContext):
-    try:
-        amount = float(message.text.replace(',', '.'))
-        user_id = message.from_user.id
-        balance = users.get(user_id, {}).get('balance', 0.0)
-
-        if amount <= 0:
-            await message.answer("Сумма вывода должна быть положительным числом. Пожалуйста, введите корректную сумму:")
-            return
-        if amount > balance:
-            await message.answer(f"Недостаточно средств на балансе ({balance:.2f} USDT). Введите сумму не более вашего баланса:")
-            return
-
-        await state.update_data(withdraw_amount=amount)
-        await message.answer("Теперь введите адрес USDT TRC20 кошелька для вывода:")
-        await state.set_state(Withdraw.waiting_for_wallet_address)
-    except ValueError:
-        await message.answer("Некорректная сумма. Пожалуйста, введите число (например, 10.0):")
-
-@dp.message(Withdraw.waiting_for_wallet_address)
-async def process_wallet_address(message: types.Message, state: FSMContext):
-    wallet_address = message.text.strip()
-    # Здесь можно добавить валидацию адреса USDT TRC20
-    if not wallet_address: # Простейшая проверка на непустой адрес
-        await message.answer("Адрес кошелька не может быть пустым. Пожалуйста, введите корректный адрес:")
-        return
-
-    data = await state.get_data()
-    amount = data['withdraw_amount']
-    user_id = message.from_user.id
-
-    # Имитация вывода средств
-    users[user_id]['balance'] -= amount
-    await save_data()
-
-    await message.answer(f"✅ Заявка на вывод {amount:.2f} USDT на адрес `{wallet_address}` принята. Средства будут отправлены в ближайшее время.", parse_mode="Markdown")
-    logging.info(f"Withdrawal request: User {user_id} wants to withdraw {amount} USDT to {wallet_address}")
-    await state.clear()
-    await show_main_menu(message)
-
-@dp.message(CompleteTask.waiting_for_task_id_to_complete)
-async def process_task_id_to_complete(message: types.Message, state: FSMContext):
-    task_id = message.text.strip()
-    user_id = message.from_user.id
-
-    if task_id not in tasks:
-        await message.answer("Задание с таким ID не найдено. Пожалуйста, введите корректный ID:")
-        return
-
-    task = tasks[task_id]
-    if task.get('executor_id') != user_id or task['status'] != 'in_progress':
-        await message.answer("Это задание либо не находится в процессе выполнения вами, либо уже завершено. Пожалуйста, введите корректный ID:")
-        return
-
-    task['status'] = 'completed'
-    task['completed_date'] = datetime.now().strftime('%d.%m.%Y %H:%M')
-    creator_id = task['creator_id']
-    price = task['price']
-
-    # Зачисление средств исполнителю
-    users[user_id]['balance'] += price
-    await save_data()
-
-    await message.answer(f"✅ Задание ID: {task_id} успешно завершено! {price:.2f} USDT зачислены на ваш баланс.")
-
-    # Уведомить создателя задания
-    try:
-        await bot.send_message(creator_id,
-                               f"🔔 Ваше задание '{task['description']}' (ID: {task_id}) было отмечено как завершенное пользователем @{message.from_user.username} (ID: {user_id}).")
-    except TelegramForbiddenError:
-        print(f"Не удалось отправить уведомление пользователю {creator_id}. Бот заблокирован.")
-
-    await state.clear()
-    await show_main_menu(message)
-
-
-# =====================
-# ФУНКЦИИ ИНТЕГРАЦИИ С CRYPTO BOT API
-# =====================
-
+ 
+ # Хранилища данных
+blocked_users = set()
+users = {}
+tasks = {}
+task_proofs = defaultdict(dict)
+task_completion_dates = defaultdict(dict)
+pending_approvals = {}
+maintenance_mode = False
+ 
+ # Классы состояний
+class TaskStates(StatesGroup):
+     waiting_for_proof = State()
+ 
+class BroadcastState(StatesGroup):
+     waiting_for_message = State()
+ 
+class BlockState(StatesGroup):
+     waiting_for_id = State()
+ 
+class UnblockState(StatesGroup):
+     waiting_for_id = State()
+ 
+class AddTaskState(StatesGroup):
+     waiting_for_task_number = State()
+     waiting_for_task_text = State()
+     waiting_for_task_photo = State()
+ 
+class DeleteTaskState(StatesGroup):
+     waiting_for_task_number = State()
+ 
+class TopStates(StatesGroup):
+     waiting_top_type = State()
+     waiting_referral_period = State()
+     waiting_task_period = State()
+ 
+class EditUserState(StatesGroup):
+     waiting_for_id = State()
+     waiting_for_field = State()
+     waiting_for_value = State()
+ 
+class WithdrawState(StatesGroup):
+     waiting_for_amount = State()
+ 
+class DepositState(StatesGroup):
+     waiting_for_amount = State()
+ 
+ # =====================
+ # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+ # =====================
+ 
+def check_not_blocked(func):
+     async def wrapper(message: types.Message, **kwargs):
+         kwargs.pop('dispatcher', None)
+ 
+         if message.from_user.id in blocked_users:
+             await message.answer("⛔ Вы заблокированы.")
+             return
+ 
+         if maintenance_mode and message.from_user.id not in ADMIN_IDS:
+             await message.answer("🔧 Бот находится на техническом обслуживании. Пожалуйста, попробуйте позже.")
+             return
+ 
+         return await func(message, **kwargs)
+     return wrapper
+ 
+def get_main_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
+     kb = [
+         [KeyboardButton(text="👀Профиль")],
+         [KeyboardButton(text="👥Рефералы"), KeyboardButton(text="💼Задания")],
+         [KeyboardButton(text="⛏️Майнинг"), KeyboardButton(text="📈Топы")],
+         [KeyboardButton(text="✉️Помощь")]
+     ]
+     if is_admin:
+         kb.append([KeyboardButton(text="👑Админка")])
+     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+def get_admin_kb() -> ReplyKeyboardMarkup:
+     return ReplyKeyboardMarkup(
+         keyboard=[
+             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🧾 Список пользователей")],
+             [KeyboardButton(text="📨 Рассылка"), KeyboardButton(text="💼 Задания")], # Corrected from Keyboard to KeyboardButton
+             [KeyboardButton(text="🚫 Заблокировать"), KeyboardButton(text="🔓 Разблокировать")],
+             [KeyboardButton(text="✏️ Редактировать пользователя")],
+             [KeyboardButton(text="📥 Экспорт данных")],
+             [KeyboardButton(text="🔧 Техперерыв Вкл" if not maintenance_mode else "🔧 Техперерыв Выкл")],
+             [KeyboardButton(text="🔙 Назад")]
+         ],
+         resize_keyboard=True
+     )
+ 
+def get_tasks_kb() -> ReplyKeyboardMarkup:
+     kb = []
+     for task_num in sorted(tasks.keys()):
+         kb.append([KeyboardButton(text=f"Задание {task_num}")])
+     kb.append([KeyboardButton(text="🔙 Назад")])
+     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+ 
+def get_task_kb(task_num: int) -> ReplyKeyboardMarkup:
+     return ReplyKeyboardMarkup(
+         keyboard=[
+             [KeyboardButton(text=f"✅ Выполнил задание {task_num}")],
+             [KeyboardButton(text="🔙 Назад")]
+         ],
+         resize_keyboard=True
+     )
+ 
+def get_tops_type_kb() -> ReplyKeyboardMarkup:
+     return ReplyKeyboardMarkup(
+         keyboard=[
+             [KeyboardButton(text="🏆 Топы приглашений"), KeyboardButton(text="🏆 Топы заданий")],
+             [KeyboardButton(text="🔙 Назад")]
+         ],
+         resize_keyboard=True
+     )
+ 
+def get_period_kb() -> ReplyKeyboardMarkup:
+     return ReplyKeyboardMarkup(
+         keyboard=[
+             [KeyboardButton(text="📅 Топ недели"), KeyboardButton(text="📅 Топ месяца")],
+             [KeyboardButton(text="🔙 Назад")]
+         ],
+         resize_keyboard=True
+     )
+ 
+def get_tasks_admin_kb() -> ReplyKeyboardMarkup:
+     return ReplyKeyboardMarkup(
+         keyboard=[
+             [KeyboardButton(text="➕ Добавить задание"), KeyboardButton(text="❌ Удалить задание")],
+             [KeyboardButton(text="🔙 Назад в админку")]
+         ],
+         resize_keyboard=True
+     )
+ 
+def get_edit_user_kb() -> ReplyKeyboardMarkup:
+     return ReplyKeyboardMarkup(
+         keyboard=[
+             [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👥 Рефералы")],
+             [KeyboardButton(text="✅ Выполнено заданий"), KeyboardButton(text="🔙 Назад")]
+         ],
+         resize_keyboard=True
+     )
+ 
+ # =====================
+ # ФУНКЦИИ ВЫВОДА И ПОПОЛНЕНИЯ
+ # =====================
+ 
+async def create_crypto_bot_check(user_id: int, amount_usdt: float) -> dict:
+     headers = {
+         'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
+         'Content-Type': 'application/json'
+     }
+ 
+     payload = {
+         'asset': 'USDT',
+         'amount': str(amount_usdt),
+         'description': f'Вывод средств пользователя {user_id}',
+         'payload': str(user_id),
+         'public': True
+     }
+ 
+     try:
+         response = requests.post(
+             f'{CRYPTO_BOT_API_URL}createCheck',
+             headers=headers,
+             json=payload,
+             timeout=15
+         )
+         response_data = response.json()
+         print("Crypto Bot API Response:", response_data)
+         return response_data
+     except Exception as e:
+         print(f"Error creating check: {e}")
+         return {'ok': False, 'error': {'name': str(e)}}
+ 
 async def create_crypto_bot_invoice(user_id: int, amount_usdt: float) -> dict:
-    headers = {
-        'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
-        'Content-Type': 'application/json'
-    }
-
-    payload = {
-        'asset': 'USDT',
-        'amount': str(amount_usdt),
-        'description': f'Пополнение баланса пользователя {user_id}',
-        'payload': str(user_id),
-        'allow_anonymous': False,
-        'compact': True # Added for compact mode
-    }
-
-    try:
-        response = requests.post(
-            f'{CRYPTO_BOT_API_URL}createInvoice',
-            headers=headers,
-            json=payload,
-            timeout=15
-        )
-        response_data = response.json()
-        print("Crypto Bot API Response:", response_data) # Для отладки
-        return response_data
-    except Exception as e:
-        print(f"Error creating invoice: {e}")
-        return {'ok': False, 'error': {'name': str(e)}}
-
-
-async def process_deposit(user_id: int, amount_usdt: float) -> tuple[bool, dict]:
-    if user_id not in users:
-        return False, {"name": "Пользователь не найден"}
-    invoice = await create_crypto_bot_invoice(user_id, amount_usdt)
-    if not invoice:
-        return False, {"name": "Ошибка при подключении к платежной системе"}
-    if not invoice.get('ok', False):
-        error_msg = invoice.get('error', {}).get('name', 'Неизвестная ошибка')
-        return False, {"name": f"Ошибка платежной системы: {error_msg}"}
-    if not invoice.get('result'):
-        return False, {"name": "Платежная система не предоставила данные для оплаты"}
-    
-    invoice_id = invoice['result']['invoice_id']
-    
-    # Construct the compact startapp URL
-    # This is the line that was changed/added to provide the compact link
-    compact_pay_url = f"https://t.me/CryptoBot/app?startapp=invoice-{invoice_id}&mode=compact"
-
-    return True, {
-        'pay_url': compact_pay_url, # Use the newly constructed compact URL
-        'invoice_id': invoice_id
-    }
-
-
-async def check_crypto_bot_invoices():
-    headers = {
-        'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN
-    }
-    # Проверяем только инвойсы, которые мы отслеживаем
-    invoice_ids_to_check = list(invoices_in_progress.keys())
-    if not invoice_ids_to_check:
-        return
-
-    # Crypto Bot API позволяет проверять несколько инвойсов через запятую
-    payload = {'invoice_ids': ','.join(invoice_ids_to_check)}
-
-    try:
-        response = requests.get(
-            f'{CRYPTO_BOT_API_URL}getInvoices',
-            headers=headers,
-            params=payload,
-            timeout=15
-        )
-        response_data = response.json()
-        if response_data.get('ok') and response_data.get('result'):
-            for invoice in response_data['result']:
-                invoice_id = str(invoice['invoice_id'])
-                if invoice_id in invoices_in_progress:
-                    if invoice['status'] == 'paid':
-                        user_id = invoices_in_progress.pop(invoice_id) # Удаляем из отслеживаемых
-                        amount = float(invoice['amount'])
-                        if user_id in users:
-                            users[user_id]['balance'] += amount
-                            await save_data()
-                            print(f"Баланс пользователя {user_id} пополнен на {amount} USDT.")
-                            try:
-                                await bot.send_message(user_id, f"✅ Ваш баланс пополнен на {amount:.2f} USDT!")
-                            except TelegramForbiddenError:
-                                print(f"Не удалось отправить уведомление пользователю {user_id}. Бот заблокирован.")
-                        else:
-                            print(f"Пользователь {user_id} не найден, но инвойс {invoice_id} оплачен.")
-                    elif invoice['status'] == 'expired' or invoice['status'] == 'cancelled':
-                        invoices_in_progress.pop(invoice_id, None) # Удаляем, если истек или отменен
-                        print(f"Инвойс {invoice_id} истек/отменен.")
-        else:
-            print(f"Ошибка при получении инвойсов: {response_data.get('error', {}).get('name', 'Неизвестная ошибка')}")
-    except Exception as e:
-        print(f"Error checking invoices: {e}")
-
-
-# =====================
-# ФУНКЦИИ УПРАВЛЕНИЯ ДАННЫМИ
-# =====================
-
-DATA_FILE = 'bot_data.csv'
-
-async def save_data():
-    data_to_save = []
-    for user_id, user_data in users.items():
-        data_to_save.append({
-            'type': 'user',
-            'id': user_id,
-            'username': user_data.get('username'),
-            'balance': user_data.get('balance'),
-            'reg_date': user_data.get('reg_date')
-        })
-    for task_id, task_data in tasks.items():
-        data_to_save.append({
-            'type': 'task',
-            'id': task_id,
-            'creator_id': task_data.get('creator_id'),
-            'executor_id': task_data.get('executor_id'),
-            'description': task_data.get('description'),
-            'price': task_data.get('price'),
-            'status': task_data.get('status'),
-            'created_date': task_data.get('created_date'),
-            'taken_date': task_data.get('taken_date'),
-            'completed_date': task_data.get('completed_date')
-        })
-    df = pd.DataFrame(data_to_save)
-    df.to_csv(DATA_FILE, index=False)
-    print("Данные сохранены.")
-
-async def load_data():
-    global users, tasks
-    if not os.path.exists(DATA_FILE):
-        print("Файл данных не найден, создаем новые пустые данные.")
-        users = {}
-        tasks = {}
-        return
-
-    try:
-        df = pd.read_csv(DATA_FILE)
-        users = {}
-        tasks = {}
-        for index, row in df.iterrows():
-            if row['type'] == 'user':
-                user_id = int(row['id'])
-                users[user_id] = {
-                    'username': row.get('username'),
-                    'balance': float(row.get('balance', 0.0)),
-                    'reg_date': row.get('reg_date')
-                }
-            elif row['type'] == 'task':
-                task_id = str(row['id'])
-                tasks[task_id] = {
-                    'creator_id': int(row.get('creator_id')),
-                    'executor_id': int(row.get('executor_id')) if pd.notna(row.get('executor_id')) else None,
-                    'description': row.get('description'),
-                    'price': float(row.get('price', 0.0)),
-                    'status': row.get('status'),
-                    'created_date': row.get('created_date'),
-                    'taken_date': row.get('taken_date'),
-                    'completed_date': row.get('completed_date')
-                }
-        print("Данные загружены.")
-    except Exception as e:
-        print(f"Ошибка при загрузке данных: {e}. Начинаем с пустых данных.")
-        users = {}
-        tasks = {}
-
-# =====================
-# ФУНКЦИИ АНАЛИТИКИ
-# =====================
-
-def get_top_users_by_completed_tasks(period: str):
-    user_completed_tasks_count = defaultdict(int)
-    current_date = datetime.now()
-
-    if period == 'week':
-        start_date = current_date - timedelta(days=7)
-    elif period == 'month':
-        start_date = current_date - timedelta(days=30)
-    else:
-        return "Неизвестный период."
-
-    for task_id, task in tasks.items():
-        if task['status'] == 'completed' and task.get('completed_date'):
-            task_date_str = task['completed_date']
-            task_date = None
-
-            # Attempt to parse as datetime object
-            if isinstance(task_date_str, datetime):
-                task_date = task_date_str
-            elif isinstance(task_date_str, str):
-                try:
-                    task_date = datetime.strptime(task_date_str, '%d.%m.%Y %H:%M')
-                except ValueError:
-                    # Fallback for older formats if necessary, or log error
-                    continue # Skip if date format is not recognized
-
-            if task_date and task_date >= start_date:
-                executor_id = task.get('executor_id')
-                if executor_id:
-                    user_completed_tasks_count[executor_id] += 1
-
-    top_users = []
-    for user_id, count in user_completed_tasks_count.items():
-        if user_id in users:
-            username = users[user_id].get('username', '—')
-            top_users.append((user_id, count, username))
-
-    top_users.sort(key=lambda x: x[1], reverse=True)
-
-    if not top_users:
-        return "🏆 Топ заданий пуст за выбранный период."
-
-    result = f"🏆 Топ заданий за {'неделю' if period == 'week' else 'месяц'}:\n\n"
-    for i, (user_id, count, username) in enumerate(top_users[:10], 1):
-        result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\n"
-
-    return result
-
-def get_top_users_by_created_tasks(period: str):
-    user_created_tasks_count = defaultdict(int)
-    current_date = datetime.now()
-
-    if period == 'week':
-        start_date = current_date - timedelta(days=7)
-    elif period == 'month':
-        start_date = current_date - timedelta(days=30)
-    else:
-        return "Неизвестный период."
-
-    for task_id, task in tasks.items():
-        if task.get('created_date'):
-            task_date = task['created_date']
-            if isinstance(task_date, datetime):
-                if task_date >= start_date:
-                    user_created_tasks_count[task['creator_id']] += 1
-            elif isinstance(task_date, str):
-                try:
-                    date_obj = datetime.strptime(task_date, '%d.%m.%Y %H:%M')
-                    if date_obj >= start_date:
-                        user_created_tasks_count[task['creator_id']] += 1
-                except ValueError:
-                    continue
-
-    top_users = []
-    for user_id, count in user_created_tasks_count.items():
-        if user_id in users:
-            username = users[user_id].get('username', '—')
-            top_users.append((user_id, count, username))
-
-    top_users.sort(key=lambda x: x[1], reverse=True)
-
-    if not top_users:
-        return "🏆 Топ заданий пуст за выбранный период."
-
-    result = f"🏆 Топ создателей заданий за {'неделю' if period == 'week' else 'месяц'}:\n\n"
-    for i, (user_id, count, username) in enumerate(top_users[:10], 1):
-        result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\n"
-
-    return result
-
-
-def get_top_users_by_total_completed_tasks_all_time():
-    user_completed_tasks_count = defaultdict(int)
-
-    for task_id, task in tasks.items():
-        if task['status'] == 'completed' and task.get('executor_id'):
-            user_completed_tasks_count[task['executor_id']] += 1
-
-    top_users = []
-    for user_id, count in user_completed_tasks_count.items():
-        username = users.get(user_id, {}).get('username', '—')
-        top_users.append((user_id, count, username))
-
-    top_users.sort(key=lambda x: x[1], reverse=True)
-
-    if not top_users:
-        return "🏆 Общий топ заданий пуст."
-
-    result = "🏆 Общий топ выполненных заданий (за все время):\n\n"
-    for i, (user_id, count, username) in enumerate(top_users[:10], 1):
-        result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\n"
-
-    return result
-
-
-def get_total_tasks_completed_count(period: str):
-    current_date = datetime.now()
-    count = 0
-
-    if period == 'week':
-        start_date = current_date - timedelta(days=7)
-    elif period == 'month':
-        start_date = current_date - timedelta(days=30)
-    else:
-        return "Неизвестный период."
-
-    for task_id, task in tasks.items():
-        if task['status'] == 'completed' and task.get('completed_date'):
-            task_date_str = task['completed_date']
-            task_date = None
-
-            if isinstance(task_date_str, datetime):
-                task_date = task_date_str
-            elif isinstance(task_date_str, str):
-                try:
-                    task_date = datetime.strptime(task_date_str, '%d.%m.%Y %H:%M')
-                except ValueError:
-                    continue
-
-            if task_date and task_date >= start_date:
-                count += 1
-    return count
-
-def get_total_tasks_created_count(period: str):
-    current_date = datetime.now()
-    count = 0
-
-    if period == 'week':
-        start_date = current_date - timedelta(days=7)
-    elif period == 'month':
-        start_date = current_date - timedelta(days=30)
-    else:
-        return "Неизвестный период."
-
-    for task_id, task in tasks.items():
-        if task.get('created_date'):
-            task_date_str = task['created_date']
-            task_date = None
-
-            if isinstance(task_date_str, datetime):
-                task_date = task_date_str
-            elif isinstance(task_date_str, str):
-                try:
-                    task_date = datetime.strptime(task_date_str, '%d.%m.%Y %H:%M')
-                    if task_date >= start_date:
-                        count += 1
-                except ValueError:
-                    continue
-
-    return count
-
-
-def get_total_users_registered_count(period: str):
-    current_date = datetime.now()
-    count = 0
-
-    if period == 'week':
-        start_date = current_date - timedelta(days=7)
-    elif period == 'month':
-        start_date = current_date - timedelta(days=30)
-    else:
-        return "Неизвестный период."
-
-    for user_id, user_data in users.items():
-        if user_data.get('reg_date'):
-            reg_date_str = user_data['reg_date']
-            reg_date = None
-
-            if isinstance(reg_date_str, datetime):
-                reg_date = reg_date_str
-            elif isinstance(reg_date_str, str):
-                try:
-                    reg_date = datetime.strptime(reg_date_str, '%d.%m.%Y %H:%M')
-                    if reg_date >= start_date:
-                        count += 1
-                except ValueError:
-                    continue
-    return count
-
-def get_top_users_by_completed_tasks_general():
-    user_completed_tasks_count = defaultdict(int)
-
-    for task_id, task in tasks.items():
-        if task['status'] == 'completed' and task.get('executor_id'):
-            user_completed_tasks_count[task['executor_id']] += 1
-
-    top_users = []
-    for user_id, count in user_completed_tasks_count.items():
-        username = users.get(user_id, {}).get('username', '—')
-        top_users.append((user_id, count, username))
-
-    top_users.sort(key=lambda x: x[1], reverse=True)
-
-    if not top_users:
-        return "🏆 Топ заданий пуст."
-
-    result = "🏆 Топ заданий (за все время):\n\n"
-    for i, (user_id, count, username) in enumerate(top_users[:10], 1):
-        result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\n"
-
-    return result
-
-def get_top_users_by_created_tasks_general():
-    user_created_tasks_count = defaultdict(int)
-
-    for task_id, task in tasks.items():
-        if task.get('creator_id'):
-            user_created_tasks_count[task['creator_id']] += 1
-
-    top_users = []
-    for user_id, count in user_created_tasks_count.items():
-        username = users.get(user_id, {}).get('username', '—')
-        top_users.append((user_id, count, username))
-
-    top_users.sort(key=lambda x: x[1], reverse=True)
-
-    if not top_users:
-        return "🏆 Топ создателей заданий пуст."
-
-    result = "🏆 Топ создателей заданий (за все время):\n\n"
-    for i, (user_id, count, username) in enumerate(top_users[:10], 1):
-        result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\n"
-
-    return result
-
-def get_total_tasks_completed_count_general():
-    count = 0
-    for task_id, task in tasks.items():
-        if task['status'] == 'completed':
-            count += 1
-    return count
-
-def get_total_tasks_created_count_general():
-    return len(tasks)
-
-def get_total_users_registered_count_general():
-    return len(users)
-
-def get_balance_distribution():
-    balances = [user['balance'] for user_id, user in users.items()]
-    if not balances:
-        return "Нет данных о балансах."
-
-    total_balance = sum(balances)
-    avg_balance = total_balance / len(balances)
-    max_balance = max(balances)
-    min_balance = min(balances)
-
-    result = (
-        f"💰 Распределение балансов:\n\n"
-        f"Общий баланс всех пользователей: {total_balance:.2f} USDT\n"
-        f"Средний баланс: {avg_balance:.2f} USDT\n"
-        f"Максимальный баланс: {max_balance:.2f} USDT\n"
-        f"Минимальный баланс: {min_balance:.2f} USDT\n"
-    )
-    return result
-
-def get_task_status_distribution():
-    status_counts = defaultdict(int)
-    for task_id, task in tasks.items():
-        status_counts[task['status']] += 1
-
-    if not status_counts:
-        return "Нет данных о статусах заданий."
-
-    total_tasks = sum(status_counts.values())
-    result = "📊 Распределение статусов заданий:\n\n"
-    for status, count in status_counts.items():
-        percentage = (count / total_tasks) * 100 if total_tasks > 0 else 0
-        result += f"- {status.capitalize()}: {count} ({percentage:.2f}%)\n"
-    return result
-
-def get_average_task_price():
-    prices = [task['price'] for task_id, task in tasks.items()]
-    if not prices:
-        return "Нет данных о ценах заданий."
-
-    avg_price = sum(prices) / len(prices)
-    return f"💲 Средняя цена задания: {avg_price:.2f} USDT"
-
-
-# =====================
-# ЗАПУСК БОТА
-# =====================
-
+     headers = {
+         'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
+         'Content-Type': 'application/json'
+     }
+ 
+     payload = {
+         'asset': 'USDT',
+         'amount': str(amount_usdt),
+         'description': f'Пополнение баланса пользователя {user_id}',
+         'payload': str(user_id),
+         'allow_anonymous': False,
+         'compact': True # Added for compact mode
+     }
+ 
+     try:
+         response = requests.post(
+             f'{CRYPTO_BOT_API_URL}createInvoice',
+             headers=headers,
+             json=payload,
+             timeout=15
+         )
+         response_data = response.json()
+         print("Crypto Bot API Response:", response_data)
+         return response_data
+     except Exception as e:
+         print(f"Error creating invoice: {e}")
+         return {'ok': False, 'error': {'name': str(e)}}
+ 
+async def check_invoice_status(invoice_id: int) -> dict:
+     headers = {
+         'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
+         'Content-Type': 'application/json'
+     }
+ 
+     try:
+         response = requests.get(
+             f'{CRYPTO_BOT_API_URL}getInvoices?invoice_ids={invoice_id}',
+             headers=headers,
+             timeout=15
+         )
+         response_data = response.json()
+         return response_data
+     except Exception as e:
+         print(f"Error checking invoice status: {e}")
+         return {'ok': False, 'error': {'name': str(e)}}
+ 
+async def process_withdrawal(user_id: int, amount_zb: int):
+     if user_id not in users:
+         return False, "Пользователь не найден"
+ 
+     user_data = users[user_id]
+     if user_data['balance'] < amount_zb:
+         return False, "Недостаточно средств на балансе"
+ 
+     amount_usdt = amount_zb * ZB_EXCHANGE_RATE
+     if amount_usdt < MIN_WITHDRAWAL:
+         return False, f"Минимальная сумма вывода: {MIN_WITHDRAWAL} USDT"
+ 
+     check = await create_crypto_bot_check(user_id, amount_usdt)
+ 
+     if not check:
+         return False, "Ошибка при подключении к платежной системе"
+ 
+     if not check.get('ok', False):
+         error_msg = check.get('error', {}).get('name', 'Неизвестная ошибка')
+         return False, f"Ошибка платежной системы: {error_msg}"
+ 
+     if not check.get('result'):
+         return False, "Платежная система не предоставила данные для вывода"
+ 
+     if 'bot_check_url' not in check['result']:
+         return False, "Платежная система не предоставила ссылку для вывода"
+ 
+     users[user_id]['balance'] -= amount_zb
+     return True, check['result']['bot_check_url']
+ 
+async def process_deposit(user_id: int, amount_usdt: float):
+     if user_id not in users:
+         return False, "Пользователь не найден"
+ 
+     invoice = await create_crypto_bot_invoice(user_id, amount_usdt)
+ 
+     if not invoice:
+         return False, "Ошибка при подключении к платежной системе"
+ 
+     if not invoice.get('ok', False):
+         error_msg = invoice.get('error', {}).get('name', 'Неизвестная ошибка')
+         return False, f"Ошибка платежной системы: {error_msg}"
+ 
+     if not invoice.get('result'):
+         return False, "Платежная система не предоставила данные для оплаты"
+ 
+     if 'pay_url' not in invoice['result']:
+         return False, "Платежная система не предоставила ссылку для оплаты"
+ 
+     return True, {
+         'pay_url': invoice['result']['pay_url'],
+         'invoice_id': invoice['result']['invoice_id']
+     }
+ 
+ # =====================
+ # ОСНОВНЫЕ КОМАНДЫ БОТА
+ # =====================
+ 
+@dp.message(CommandStart())
+@check_not_blocked
+async def cmd_start(message: types.Message, command: CommandObject = None, **kwargs):
+     if maintenance_mode and message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     user_id = message.from_user.id
+     username = message.from_user.username or "—"
+ 
+     referrer_id = None
+     if command and command.args and command.args.isdigit():
+         referrer_id = int(command.args)
+ 
+     if user_id not in users:
+         users[user_id] = {
+             'reg_date': datetime.now().strftime('%d.%m.%Y %H:%M'),
+             'referrals': [],
+             'username': username,
+             'balance': 0,
+             'last_mine_time': None
+         }
+ 
+         if referrer_id and referrer_id != user_id and referrer_id in users:
+             users[referrer_id]['referrals'].append(user_id)
+             users[referrer_id]['balance'] += REFERRAL_REWARD
+             try:
+                 await bot.send_message(
+                     referrer_id,
+                     f"🎉 Вы получили {REFERRAL_REWARD} Zebranium за приглашенного реферала!"
+                 )
+             except Exception:
+                 pass
+ 
+     is_admin = user_id in ADMIN_IDS
+     await message.answer(
+         "🤖 Добро пожаловать в бота!\nВыберите действие в меню ниже:",
+         reply_markup=get_main_kb(is_admin)
+     )
+ 
+@dp.message(F.text == "👀Профиль")
+@check_not_blocked
+async def profile_handler(message: types.Message, **kwargs):
+     user = users.get(message.from_user.id, {})
+     balance = user.get('balance', 0)
+ 
+     builder = InlineKeyboardBuilder()
+     builder.add(InlineKeyboardButton(
+         text="💰 Пополнить баланс",
+         callback_data="deposit_funds"
+     ))
+ 
+     if balance >= (MIN_WITHDRAWAL / ZB_EXCHANGE_RATE):
+         builder.add(InlineKeyboardButton(
+             text="💸 Вывести средства",
+             callback_data="withdraw_funds"
+         ))
+ 
+     await message.answer(
+         f"👤 Ваш профиль:\n"
+         f"🆔 ID: {message.from_user.id}\n"
+         f"🔗 Юзернейм: @{user.get('username', '—')}\n"
+         f"📅 Регистрация: {user.get('reg_date', '—')}\n"
+         f"👥 Рефералов: {len(user.get('referrals', []))}\n"
+         f"✅ Выполнено заданий: {len(task_proofs.get(message.from_user.id, {}))}\n"
+         f"💎 Баланс: {balance} Zebranium (≈{balance * ZB_EXCHANGE_RATE:.2f} USDT)\n\n"
+         f"Минимальная сумма вывода: {MIN_WITHDRAWAL} USDT",
+         reply_markup=builder.as_markup()
+     )
+ 
+@dp.callback_query(F.data == "deposit_funds")
+async def deposit_funds_handler(callback: types.CallbackQuery, state: FSMContext):
+     await callback.message.answer(
+         "💰 Пополнение баланса\n\n"
+         "Введите сумму в USDT, которую хотите внести (например: 5):",
+         reply_markup=ReplyKeyboardMarkup(
+             keyboard=[[KeyboardButton(text="🔙 Отмена")]],
+             resize_keyboard=True
+         )
+     )
+     await state.set_state(DepositState.waiting_for_amount)
+     await callback.answer()
+ 
+@dp.message(DepositState.waiting_for_amount, F.text == "🔙 Отмена")
+async def cancel_deposit(message: types.Message, state: FSMContext):
+     await message.answer(
+         "❌ Пополнение баланса отменено.",
+         reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
+     )
+     await state.clear()
+ 
+@dp.message(DepositState.waiting_for_amount)
+async def process_deposit_amount(message: types.Message, state: FSMContext):
+     try:
+         amount_usdt = float(message.text)
+         if amount_usdt <= 0:
+             raise ValueError
+ 
+         user_id = message.from_user.id
+         success, result = await process_deposit(user_id, amount_usdt)
+ 
+         if success:
+             invoice_url = result['pay_url']
+             invoice_id = result['invoice_id']
+ 
+             await message.answer(
+                 f"✅ Счет на оплату создан!\n"
+                 f"Сумма: {amount_usdt} USDT\n"
+                 f"Для оплаты перейдите по ссылке: {invoice_url}\n\n"
+                 "После оплаты баланс будет зачислен автоматически.",
+                 reply_markup=get_main_kb(user_id in ADMIN_IDS)
+             )
+ 
+             # Запускаем проверку статуса платежа
+             asyncio.create_task(check_payment_status(user_id, invoice_id, amount_usdt))
+         else:
+             await message.answer(
+                 f"❌ Ошибка: {result}",
+                 reply_markup=get_main_kb(user_id in ADMIN_IDS)
+             )
+     except ValueError:
+         await message.answer("❌ Пожалуйста, введите положительное число.")
+         return
+ 
+     await state.clear()
+ 
+async def check_payment_status(user_id: int, invoice_id: int, amount_usdt: float):
+     max_attempts = 30  # Максимальное количество проверок
+     attempt = 0
+ 
+     while attempt < max_attempts:
+         await asyncio.sleep(10)  # Проверяем каждые 10 секунд
+ 
+         invoice_data = await check_invoice_status(invoice_id)
+ 
+         if not invoice_data.get('ok', False):
+             print(f"Ошибка при проверке счета {invoice_id}: {invoice_data.get('error', {}).get('name')}")
+             attempt += 1
+             continue
+ 
+         invoice_status = invoice_data['result']['items'][0]['status']
+ 
+         if invoice_status == 'paid':
+             # Зачисляем средства
+             amount_zb = int(amount_usdt / ZB_EXCHANGE_RATE)
+             users[user_id]['balance'] += amount_zb
+ 
+             try:
+                 await bot.send_message(
+                     user_id,
+                     f"✅ Ваш баланс успешно пополнен на {amount_zb} Zebranium!"
+                 )
+             except Exception as e:
+                 print(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
+ 
+             return
+ 
+         elif invoice_status in ['expired', 'cancelled']:
+             try:
+                 await bot.send_message(
+                     user_id,
+                     f"❌ Счет на оплату {amount_usdt} USDT был отменен или истек."
+                 )
+             except Exception:
+                 pass
+             return
+ 
+         attempt += 1
+ 
+     # Если платеж не подтвердился за отведенное время
+     try:
+         await bot.send_message(
+             user_id,
+             f"❌ Время ожидания платежа истекло. Если вы произвели оплату, обратитесь в поддержку."
+         )
+     except Exception:
+         pass
+ 
+@dp.callback_query(F.data == "withdraw_funds")
+async def withdraw_funds_handler(callback: types.CallbackQuery, state: FSMContext):
+     user_id = callback.from_user.id
+     user_data = users.get(user_id, {})
+     balance = user_data.get('balance', 0)
+     max_withdraw_zb = int(balance)
+     max_withdraw_usdt = max_withdraw_zb * ZB_EXCHANGE_RATE
+ 
+     await callback.message.answer(
+         f"💸 Вывод средств\n\n"
+         f"Доступно для вывода: {max_withdraw_zb} Zebranium (≈{max_withdraw_usdt:.2f} USDT)\n"
+         f"Минимальная сумма вывода: {MIN_WITHDRAWAL} USDT\n\n"
+         f"Введите сумму Zebranium для вывода (целое число):",
+         reply_markup=ReplyKeyboardMarkup(
+             keyboard=[[KeyboardButton(text="🔙 Отмена")]],
+             resize_keyboard=True
+         )
+     )
+     await state.set_state(WithdrawState.waiting_for_amount)
+     await callback.answer()
+ 
+@dp.message(WithdrawState.waiting_for_amount, F.text == "🔙 Отмена")
+async def cancel_withdrawal(message: types.Message, state: FSMContext):
+     await message.answer(
+         "❌ Вывод средств отменен.",
+         reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
+     )
+     await state.clear()
+ 
+@dp.message(WithdrawState.waiting_for_amount)
+async def process_withdrawal_amount(message: types.Message, state: FSMContext):
+     try:
+         amount_zb = int(message.text)
+         if amount_zb <= 0:
+             raise ValueError
+ 
+         user_id = message.from_user.id
+         success, result = await process_withdrawal(user_id, amount_zb)
+ 
+         if success:
+             await message.answer(
+                 f"✅ Запрос на вывод {amount_zb} Zebranium (≈{amount_zb * ZB_EXCHANGE_RATE:.2f} USDT) принят!\n"
+                 f"Для получения средств перейдите по ссылке: {result}",
+                 reply_markup=get_main_kb(user_id in ADMIN_IDS)
+             )
+         else:
+             await message.answer(
+                 f"❌ Ошибка: {result}",
+                 reply_markup=get_main_kb(user_id in ADMIN_IDS)
+             )
+     except ValueError:
+         await message.answer("❌ Пожалуйста, введите целое положительное число.")
+         return
+ 
+     await state.clear()
+ 
+@dp.message(F.text == "👥Рефералы")
+@check_not_blocked
+async def referrals_handler(message: types.Message, **kwargs):
+     user_id = message.from_user.id
+     bot_username = (await bot.get_me()).username
+     link = f"https://t.me/{bot_username}?start={user_id}"
+     count = len(users.get(user_id, {}).get("referrals", []))
+     await message.answer(
+         f"🔗 Ваша реферальная ссылка:\n{link}\n\n"
+         f"👥 Приглашено пользователей: {count}\n\n"
+         f"💎 Вы получаете {REFERRAL_REWARD} Zebranium за каждого приглашенного друга!"
+     )
+ 
+@dp.message(F.text == "⛏️Майнинг")
+@check_not_blocked
+async def mining_handler(message: types.Message, **kwargs):
+     user_id = message.from_user.id
+     if user_id not in users:
+         await message.answer("❌ Сначала зарегистрируйтесь через /start")
+         return
+ 
+     user_data = users[user_id]
+     now = datetime.now()
+ 
+     if user_data['last_mine_time']:
+         last_mine = datetime.strptime(user_data['last_mine_time'], '%d.%m.%Y %H:%M')
+         delta = now - last_mine
+         if delta.total_seconds() < MINING_COOLDOWN:
+             wait_time = MINING_COOLDOWN - delta.total_seconds()
+             hours = int(wait_time // 3600)
+             minutes = int((wait_time % 3600) // 60)
+             await message.answer(
+                 f"⏳ Следующий майнинг доступен через: {hours} час. {minutes} мин.\n"
+                 f"💎 Ваш баланс: {user_data['balance']} Zebranium"
+             )
+             return
+ 
+     reward = random.randint(*MINING_REWARD_RANGE)
+     users[user_id]['balance'] += reward
+     users[user_id]['last_mine_time'] = now.strftime('%d.%m.%Y %H:%M')
+ 
+     await message.answer(
+         f"⛏ Вы успешно добыли {reward} Zebranium!\n"
+         f"💎 Текущий баланс: {users[user_id]['balance']} ZB\n"
+         f"⏳ Следующий майнинг через 1 час"
+     )
+ 
+@dp.message(F.text == "💼Задания")
+@check_not_blocked
+async def tasks_handler(message: types.Message, **kwargs):
+     if not tasks:
+         await message.answer("📭 На данный момент нет доступных заданий.")
+         return
+ 
+     tasks_list = "\n".join([f"• Задание {num}" for num in sorted(tasks.keys())])
+     await message.answer(
+         f"📋 Доступные задания:\n{tasks_list}\n\n"
+         "Выберите задание из списка ниже:",
+         reply_markup=get_tasks_kb()
+     )
+ 
+@dp.message(F.text == "📈Топы")
+@check_not_blocked
+async def tops_handler(message: types.Message, **kwargs):
+     await message.answer("🏆 Выберите тип топа:", reply_markup=get_tops_type_kb())
+ 
+@dp.message(F.text == "🏆 Топы приглашений")
+@check_not_blocked
+async def referral_top_type(message: types.Message, state: FSMContext, **kwargs):
+     await message.answer("📅 Выберите период:", reply_markup=get_period_kb())
+     await state.set_state(TopStates.waiting_referral_period)
+ 
+@dp.message(F.text == "🏆 Топы заданий")
+@check_not_blocked
+async def tasks_top_type(message: types.Message, state: FSMContext, **kwargs):
+     await message.answer("📅 Выберите период:", reply_markup=get_period_kb())
+     await state.set_state(TopStates.waiting_task_period)
+ 
+@dp.message(TopStates.waiting_referral_period, F.text.in_(["📅 Топ недели", "📅 Топ месяца"]))
+@check_not_blocked
+async def referral_top_period(message: types.Message, state: FSMContext, **kwargs):
+     period = "week" if "недели" in message.text else "month"
+     top_text = await get_referral_top(period)
+     await message.answer(top_text, reply_markup=get_tops_type_kb())
+     await state.clear()
+ 
+@dp.message(TopStates.waiting_task_period, F.text.in_(["📅 Топ недели", "📅 Топ месяца"]))
+@check_not_blocked
+async def tasks_top_period(message: types.Message, state: FSMContext, **kwargs):
+     period = "week" if "недели" in message.text else "month"
+     top_text = await get_tasks_top(period)
+     await message.answer(top_text, reply_markup=get_tops_type_kb())
+     await state.clear()
+ 
+@dp.message(F.text.regexp(r'^Задание \d+$'))
+@check_not_blocked
+async def show_task(message: types.Message, **kwargs):
+     try:
+         task_num = int(message.text.split()[1])
+         task = tasks.get(task_num)
+ 
+         if not task:
+             await message.answer(f"⚠️ Задание {task_num} не найдено.")
+             return
+ 
+         response = f"📌 Задание {task_num}\n\n{task['text']}"
+ 
+         if task.get('photo'):
+             await message.answer_photo(
+                 task['photo'], 
+                 caption=response,
+                 reply_markup=get_task_kb(task_num)
+             )
+         else:
+             await message.answer(
+                 response,
+                 reply_markup=get_task_kb(task_num)
+             )
+ 
+     except Exception:
+         await message.answer("❌ Ошибка при загрузке задания.")
+ 
+@dp.message(F.text.regexp(r'^✅ Выполнил задание \d+$'))
+@check_not_blocked
+async def task_complete_handler(message: types.Message, state: FSMContext, **kwargs):
+     try:
+         task_num = int(message.text.split()[-1])
+ 
+         if task_num not in tasks:
+             await message.answer(f"❌ Задание {task_num} не существует.")
+             return
+ 
+         await message.answer(
+             "📎 Пришлите фото или скриншот в качестве доказательства выполнения задания:",
+             reply_markup=ReplyKeyboardMarkup(
+                 keyboard=[[KeyboardButton(text="🔙 Отмена")]],
+                 resize_keyboard=True
+             )
+         )
+         await state.update_data(task_num=task_num)
+         await state.set_state(TaskStates.waiting_for_proof)
+ 
+     except Exception:
+         await message.answer("❌ Произошла ошибка. Пожалуйста, попробуйте еще раз.")
+ 
+@dp.message(TaskStates.waiting_for_proof, F.photo)
+async def process_task_proof(message: types.Message, state: FSMContext, **kwargs):
+     data = await state.get_data()
+     task_num = data['task_num']
+     user_id = message.from_user.id
+     username = users.get(user_id, {}).get('username', 'нет username')
+ 
+     pending_approvals[(user_id, task_num)] = {
+         'photo': message.photo[-1].file_id,
+         'date': datetime.now()
+     }
+ 
+     proof_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+         [
+             InlineKeyboardButton(text="✅ Принять", callback_data=f"accept_{user_id}_{task_num}"),
+             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user_id}_{task_num}")
+         ]
+     ])
+ 
+     for admin_id in ADMIN_IDS:
+         try:
+             await bot.send_photo(
+                 admin_id,
+                 photo=message.photo[-1].file_id,
+                 caption=f"🆔 Пользователь @{username} (ID: {user_id}) выполнил задание {task_num}!",
+                 reply_markup=proof_keyboard
+             )
+         except Exception:
+             pass
+ 
+     await message.answer(
+         "✅ Ваше доказательство отправлено администраторам на проверку!",
+         reply_markup=get_main_kb(user_id in ADMIN_IDS)
+     )
+     await state.clear()
+ 
+@dp.message(TaskStates.waiting_for_proof, F.text == "🔙 Отмена")
+async def cancel_proof_upload(message: types.Message, state: FSMContext, **kwargs):
+     await message.answer(
+         "❌ Отправка доказательства отменена.",
+         reply_markup=get_main_kb(message.from_user.id in ADMIN_IDS)
+     )
+     await state.clear()
+ 
+@dp.callback_query(F.data.startswith("accept_"))
+async def accept_proof(callback: types.CallbackQuery, **kwargs):
+     if callback.from_user.id not in ADMIN_IDS:
+         await callback.answer("⛔ У вас нет прав для этого действия!")
+         return
+ 
+     _, user_id_str, task_num_str = callback.data.split('_')
+     user_id = int(user_id_str)
+     task_num = int(task_num_str)
+ 
+     if (user_id, task_num) not in pending_approvals:
+         await callback.answer("⚠️ Доказательство уже обработано!")
+         return
+ 
+     proof_data = pending_approvals.pop((user_id, task_num))
+     task_proofs[user_id][task_num] = proof_data['photo']
+     task_completion_dates[user_id][task_num] = proof_data['date']
+ 
+     reward = random.randint(*TASK_REWARD_RANGE)
+     if user_id in users:
+         users[user_id]['balance'] += reward
+ 
+     try:
+         await bot.send_message(
+             user_id,
+             f"🎉 Ваше доказательство для задания {task_num} было принято!\n"
+             f"💎 Вы получили {reward} Zebranium!"
+         )
+     except Exception:
+         pass
+ 
+     await callback.answer("✅ Доказательство принято!")
+     await callback.message.edit_reply_markup(reply_markup=None)
+ 
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_proof(callback: types.CallbackQuery, **kwargs):
+     if callback.from_user.id not in ADMIN_IDS:
+         await callback.answer("⛔ У вас нет прав для этого действия!")
+         return
+ 
+     _, user_id_str, task_num_str = callback.data.split('_')
+     user_id = int(user_id_str)
+     task_num = int(task_num_str)
+ 
+     if (user_id, task_num) not in pending_approvals:
+         await callback.answer("⚠️ Доказательство уже обработано!")
+         return
+ 
+     pending_approvals.pop((user_id, task_num))
+ 
+     try:
+         await bot.send_message(
+             user_id,
+             f"❌ Ваше доказательство для задания {task_num} было отклонено администратором."
+         )
+     except Exception:
+         pass
+ 
+     await callback.answer("❌ Доказательство отклонено!")
+     await callback.message.edit_reply_markup(reply_markup=None)
+ 
+@dp.message(F.text == "✉️Помощь")
+@check_not_blocked
+async def help_handler(message: types.Message, **kwargs):
+     await message.answer(
+         "ℹ️ Справка по боту:\n\n"
+         "• 👀Профиль - ваши данные\n"
+         "• 👥Рефералы - ваша реферальная ссылка\n"
+         "• ⛏️Майнинг - добыча Zebranium каждые 60 минут\n"
+         "• 💼Задания - выполнение заданий за награду\n"
+         "• 📈Топы - рейтинги пользователей\n\n"
+         "После выполнения задания нажмите '✅ Выполнил' и отправьте доказательство.\n\n"
+         "По всем вопросам обращайтесь к администратору."
+     )
+ 
+@dp.message(F.text == "🔙 Назад")
+@check_not_blocked
+async def back_handler(message: types.Message, state: FSMContext, **kwargs):
+     current_state = await state.get_state()
+ 
+     if current_state in [TopStates.waiting_referral_period, TopStates.waiting_task_period]:
+         await message.answer("🏆 Выберите тип топа:", reply_markup=get_tops_type_kb())
+         await state.set_state(TopStates.waiting_top_type)
+     else:
+         is_admin = message.from_user.id in ADMIN_IDS
+         await message.answer("↩️ Возврат в главное меню", reply_markup=get_main_kb(is_admin))
+         await state.clear()
+ 
+@dp.message(F.text == "👑Админка")
+async def admin_panel(message: types.Message, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         await message.answer("⛔ Доступ запрещен.")
+         return
+ 
+     await message.answer("👑 Админ-панель", reply_markup=get_admin_kb())
+ 
+@dp.message(F.text == "💼 Задания")
+async def tasks_admin_menu(message: types.Message, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     await message.answer("📋 Управление заданиями:", reply_markup=get_tasks_admin_kb())
+ 
+@dp.message(F.text == "➕ Добавить задание")
+async def add_task_start(message: types.Message, state: FSMContext, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     await message.answer("Введите номер нового задания (только цифры):")
+     await state.set_state(AddTaskState.waiting_for_task_number)
+ 
+@dp.message(AddTaskState.waiting_for_task_number)
+async def process_task_number(message: types.Message, state: FSMContext, **kwargs):
+     try:
+         task_num = int(message.text)
+         if task_num <= 0:
+             raise ValueError
+         if task_num in tasks:
+             await message.answer(f"❌ Задание {task_num} уже существует.")
+             return
+     except ValueError:
+         await message.answer("❌ Некорректный номер. Введите положительное число.")
+         return
+ 
+     await state.update_data(task_num=task_num)
+     await message.answer("Введите текст задания:")
+     await state.set_state(AddTaskState.waiting_for_task_text)
+ 
+@dp.message(AddTaskState.waiting_for_task_text)
+async def process_task_text(message: types.Message, state: FSMContext, **kwargs):
+     if not message.text:
+         await message.answer("❌ Текст задания не может быть пустым.")
+         return
+ 
+     await state.update_data(text=message.text)
+     await message.answer(
+         "Отправьте фото для задания (если нужно) или нажмите 'Пропустить':",
+         reply_markup=ReplyKeyboardMarkup(
+             keyboard=[[KeyboardButton(text="Пропустить")]],
+             resize_keyboard=True
+         )
+     )
+     await state.set_state(AddTaskState.waiting_for_task_photo)
+ 
+@dp.message(AddTaskState.waiting_for_task_photo, F.text == "Пропустить")
+async def skip_task_photo(message: types.Message, state: FSMContext, **kwargs):
+     data = await state.get_data()
+     tasks[data['task_num']] = {
+         'text': data['text'],
+         'photo': None
+     }
+     await message.answer(
+         f"✅ Задание {data['task_num']} успешно добавлено!",
+         reply_markup=get_admin_kb()
+     )
+     await state.clear()
+ 
+@dp.message(AddTaskState.waiting_for_task_photo, F.photo)
+async def add_task_with_photo(message: types.Message, state: FSMContext, **kwargs):
+     data = await state.get_data()
+     tasks[data['task_num']] = {
+         'text': data['text'],
+         'photo': message.photo[-1].file_id
+     }
+     await message.answer(
+         f"✅ Задание {data['task_num']} с фото успешно добавлено!",
+         reply_markup=get_admin_kb()
+     )
+     await state.clear()
+ 
+@dp.message(F.text == "❌ Удалить задание")
+async def delete_task_start(message: types.Message, state: FSMContext, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     if not tasks:
+         await message.answer("❌ Нет доступных заданий для удаления.")
+         return
+ 
+     tasks_list = "\n".join([f"Задание {num}" for num in sorted(tasks.keys())])
+     await message.answer(
+         f"📝 Список заданий:\n{tasks_list}\n\n"
+         "Введите номер задания для удаления:"
+     )
+     await state.set_state(DeleteTaskState.waiting_for_task_number)
+ 
+@dp.message(DeleteTaskState.waiting_for_task_number)
+async def delete_task_process(message: types.Message, state: FSMContext, **kwargs):
+     try:
+         task_num = int(message.text)
+         if task_num not in tasks:
+             await message.answer(f"❌ Задание {task_num} не существует.")
+             return
+ 
+         del tasks[task_num]
+ 
+         # Удаляем все связанные данные
+         for user_id in task_proofs:
+             if task_num in task_proofs[user_id]:
+                 del task_proofs[user_id][task_num]
+             if task_num in task_completion_dates[user_id]:
+                 del task_completion_dates[user_id][task_num]
+ 
+         # Удаляем ожидающие подтверждения
+         keys_to_delete = [key for key in pending_approvals.keys() if key[1] == task_num]
+         for key in keys_to_delete:
+             del pending_approvals[key]
+ 
+         await message.answer(
+             f"✅ Задание {task_num} успешно удалено!",
+             reply_markup=get_admin_kb()
+         )
+     except ValueError:
+         await message.answer("❌ Некорректный номер задания.")
+     await state.clear()
+ 
+@dp.message(F.text == "📊 Статистика")
+async def stats_handler(message: types.Message, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     completed_tasks = sum(len(proofs) for proofs in task_proofs.values())
+     total_balance = sum(user.get('balance', 0) for user in users.values())
+ 
+     await message.answer(
+         f"📊 Статистика бота:\n\n"
+         f"👤 Пользователей: {len(users)}\n"
+         f"💰 Всего Zebranium: {total_balance}\n"
+         f"📝 Заданий: {len(tasks)}\n"
+         f"✅ Выполнено заданий: {completed_tasks}\n"
+         f"🚫 Заблокировано: {len(blocked_users)}\n"
+         f"⏳ Ожидают проверки: {len(pending_approvals)}"
+     )
+ 
+@dp.message(F.text == "📥 Экспорт данных")
+async def export_users_data(message: types.Message, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     if not users:
+         await message.answer("Нет данных для экспорта.")
+         return
+ 
+     try:
+         data = []
+         for user_id, user_data in users.items():
+             completed_tasks = task_proofs.get(user_id, {})
+             task_dates = [
+                 task_completion_dates.get(user_id, {}).get(task_num, datetime.min).strftime('%d.%m.%Y %H:%M')
+                 for task_num in completed_tasks
+             ]
+ 
+             data.append({
+                 "ID": user_id,
+                 "Username": f"@{user_data.get('username', '—')}",
+                 "Дата регистрации": user_data.get('reg_date', '—'),
+                 "Баланс ZB": user_data.get('balance', 0),
+                 "Рефералов": len(user_data.get('referrals', [])),
+                 "Выполнено заданий": len(completed_tasks),
+                 "Номера заданий": ", ".join(map(str, completed_tasks.keys())) if completed_tasks else "—",
+                 "Даты выполнения": "; ".join(task_dates) if task_dates else "—",
+                 "Статус": "Заблокирован" if user_id in blocked_users else "Активен"
+             })
+ 
+         df = pd.DataFrame(data)
+ 
+         excel_buffer = io.BytesIO()
+         with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+             df.to_excel(writer, index=False, sheet_name='Пользователи')
+ 
+             workbook = writer.book
+             worksheet = writer.sheets['Пользователи']
+ 
+             column_widths = {
+                 'A:A': 12,
+                 'B:B': 20,
+                 'C:C': 20,
+                 'D:D': 15,
+                 'E:E': 10,
+                 'F:F': 15,
+                 'G:G': 20,
+                 'H:H': 30,
+                 'I:I': 12
+             }
+ 
+             for cols, width in column_widths.items():
+                 worksheet.set_column(cols, width)
+ 
+             header_format = workbook.add_format({'bold': True})
+             for col_num, value in enumerate(df.columns.values):
+                 worksheet.write(0, col_num, value, header_format)
+ 
+         excel_buffer.seek(0)
+ 
+         await message.answer_document(
+             BufferedInputFile(
+                 excel_buffer.getvalue(),
+                 filename="users_export.xlsx"
+             ),
+             caption="📊 Экспорт данных пользователей"
+         )
+ 
+     except Exception as e:
+         await message.answer(f"❌ Ошибка при экспорте данных: {str(e)}")
+ 
+@dp.message(F.text == "🧾 Список пользователей")
+async def users_list_handler(message: types.Message, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     if not users:
+         await message.answer("Список пользователей пуст.")
+         return
+ 
+     text = "🧾 Список пользователей:\n\n"
+     for uid, data in users.items():
+         completed = len(task_proofs.get(uid, {}))
+         text += f"{uid} - @{data.get('username', '—')} (💰 {data.get('balance', 0)} ZB | ✅ {completed})\n"
+ 
+     for i in range(0, len(text), 4000):
+         await message.answer(text[i:i+4000])
+ 
+@dp.message(F.text == "🚫 Заблокировать")
+async def block_user_start(message: types.Message, state: FSMContext, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     await message.answer("Введите ID пользователя для блокировки:")
+     await state.set_state(BlockState.waiting_for_id)
+ 
+@dp.message(BlockState.waiting_for_id)
+async def block_user_process(message: types.Message, state: FSMContext, **kwargs):
+     try:
+         user_id = int(message.text)
+     except ValueError:
+         await message.answer("❌ Неверный формат ID.")
+         await state.clear()
+         return
+ 
+     blocked_users.add(user_id)
+     await message.answer(f"✅ Пользователь {user_id} заблокирован.")
+     await state.clear()
+ 
+@dp.message(F.text == "🔓 Разблокировать")
+async def unblock_user_start(message: types.Message, state: FSMContext, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     await message.answer("Введите ID пользователя для разблокировки:")
+     await state.set_state(UnblockState.waiting_for_id)
+ 
+@dp.message(UnblockState.waiting_for_id)
+async def unblock_user_process(message: types.Message, state: FSMContext, **kwargs):
+     try:
+         user_id = int(message.text)
+     except ValueError:
+         await message.answer("❌ Неверный формат ID.")
+         await state.clear()
+         return
+ 
+     if user_id in blocked_users:
+         blocked_users.remove(user_id)
+         await message.answer(f"✅ Пользователь {user_id} разблокирован.")
+     else:
+         await message.answer(f"ℹ️ Пользователь {user_id} не был заблокирован.")
+     await state.clear()
+ 
+@dp.message(F.text == "📨 Рассылка")
+async def broadcast_start(message: types.Message, state: FSMContext, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     await message.answer("Введите сообщение для рассылки:")
+     await state.set_state(BroadcastState.waiting_for_message)
+ 
+@dp.message(BroadcastState.waiting_for_message)
+async def broadcast_process(message: types.Message, state: FSMContext, **kwargs):
+     text = message.text
+     success = 0
+     errors = 0
+ 
+     for user_id in users:
+         try:
+             await bot.send_message(user_id, text)
+             success += 1
+         except Exception:
+             errors += 1
+ 
+     await message.answer(
+         f"📨 Результаты рассылки:\n\n"
+         f"✅ Успешно: {success}\n"
+         f"❌ Ошибок: {errors}"
+     )
+     await state.clear()
+ 
+@dp.message(F.text == "✏️ Редактировать пользователя")
+async def edit_user_start(message: types.Message, state: FSMContext, **kwargs):
+     if message.from_user.id not in ADMIN_IDS:
+         return
+ 
+     await message.answer("Введите ID пользователя для редактирования:")
+     await state.set_state(EditUserState.waiting_for_id)
+ 
+@dp.message(EditUserState.waiting_for_id)
+async def process_user_id(message: types.Message, state: FSMContext, **kwargs):
+     try:
+         user_id = int(message.text)
+     except ValueError:
+         await message.answer("❌ Неверный формат ID.")
+         await state.clear()
+         return
+ 
+     if user_id not in users:
+         await message.answer("❌ Пользователь с таким ID не найден.")
+         await state.clear()
+         return
+ 
+     await state.update_data(user_id=user_id)
+     await message.answer(
+         f"✏️ Редактирование пользователя {user_id}\n"
+         f"Выберите параметр для изменения:",
+         reply_markup=get_edit_user_kb()
+     )
+     await state.set_state(EditUserState.waiting_for_field)
+ 
+@dp.message(EditUserState.waiting_for_field, F.text.in_(["💰 Баланс", "👥 Рефералы", "✅ Выполнено заданий"]))
+async def process_edit_field(message: types.Message, state: FSMContext, **kwargs):
+     field_map = {
+         "💰 Баланс": "balance",
+         "👥 Рефералы": "referrals",
+         "✅ Выполнено заданий": "completed_tasks"
+     }
+ 
+     await state.update_data(field=field_map[message.text])
+     await message.answer(
+         f"Введите новое значение для {message.text.lower()}:",
+         reply_markup=ReplyKeyboardMarkup(
+             keyboard=[[KeyboardButton(text="🔙 Назад")]],
+             resize_keyboard=True
+         )
+     )
+     await state.set_state(EditUserState.waiting_for_value)
+ 
+@dp.message(EditUserState.waiting_for_field, F.text == "🔙 Назад")
+async def back_from_edit_user(message: types.Message, state: FSMContext, **kwargs):
+     await message.answer("👑 Админ-панель", reply_markup=get_admin_kb())
+     await state.clear()
+ 
+@dp.message(EditUserState.waiting_for_value, F.text == "🔙 Назад")
+async def back_from_edit_value(message: types.Message, state: FSMContext, **kwargs):
+     data = await state.get_data()
+     await message.answer(
+         f"✏️ Редактирование пользователя {data['user_id']}\n"
+         f"Выберите параметр для изменения:",
+         reply_markup=get_edit_user_kb()
+     )
+     await state.set_state(EditUserState.waiting_for_field)
+ 
+@dp.message(EditUserState.waiting_for_value)
+async def process_edit_value(message: types.Message, state: FSMContext, **kwargs):
+     data = await state.get_data()
+     user_id = data['user_id']
+     field = data['field']
+ 
+     try:
+         if field == "balance":
+             new_value = int(message.text)
+             users[user_id]['balance'] = new_value
+         elif field == "referrals":
+             new_value = int(message.text)
+             users[user_id]['referrals'] = [0] * new_value
+         elif field == "completed_tasks":
+             new_value = int(message.text)
+ 
+             # Очищаем текущие задания пользователя
+             if user_id in task_proofs:
+                 del task_proofs[user_id]
+             if user_id in task_completion_dates:
+                 del task_completion_dates[user_id]
+ 
+             # Добавляем новые задания
+             if new_value > 0:
+                 available_tasks = sorted(tasks.keys())
+                 tasks_to_add = min(new_value, len(available_tasks))
+ 
+                 task_proofs[user_id] = {}
+                 task_completion_dates[user_id] = {}
+ 
+                 for task_num in available_tasks[:tasks_to_add]:
+                     task_proofs[user_id][task_num] = "manually_added_by_admin"
+                     task_completion_dates[user_id][task_num] = datetime.now().strftime('%d.%m.%Y %H:%M')
+ 
+         await message.answer(
+             f"✅ Данные пользователя {user_id} успешно обновлены!",
+             reply_markup=get_admin_kb()
+         )
+         await state.clear()
+     except ValueError:
+         await message.answer("❌ Неверный формат значения. Введите целое число.")
+ 
+ # =====================
+ # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ТОПОВ
+ # =====================
+ 
+async def get_referral_top(period: str = "week") -> str:
+     now = datetime.now()
+ 
+     if period == "week":
+         start_date = now - timedelta(days=7)
+     else:  # month
+         start_date = now - timedelta(days=30)
+ 
+     top_users = []
+ 
+     for user_id, user_data in users.items():
+         if 'reg_date' not in user_data:
+             continue
+ 
+         reg_date = datetime.strptime(user_data['reg_date'], '%d.%m.%Y %H:%M')
+         if reg_date < start_date:
+             continue
+ 
+         referrals = [
+             ref_id for ref_id in user_data.get('referrals', []) 
+             if ref_id in users and 
+             datetime.strptime(users[ref_id]['reg_date'], '%d.%m.%Y %H:%M') >= start_date
+         ]
+ 
+         if referrals:
+             top_users.append((user_id, len(referrals), user_data.get('username', '—')))
+ 
+     top_users.sort(key=lambda x: x[1], reverse=True)
+ 
+     if not top_users:
+         return "🏆 Топ рефералов пуст за выбранный период."
+ 
+     result = f"🏆 Топ рефералов за {'неделю' if period == 'week' else 'месяц'}:\n\n"
+     for i, (user_id, count, username) in enumerate(top_users[:10], 1):
+         result += f"{i}. @{username} (ID: {user_id}) - {count} реф.\n"
+ 
+     return result
+ 
+async def get_tasks_top(period: str = "week") -> str:
+     now = datetime.now()
+ 
+     if period == "week":
+         start_date = now - timedelta(days=7)
+     else:  # month
+         start_date = now - timedelta(days=30)
+ 
+     top_users = []
+ 
+     for user_id, tasks_completed in task_completion_dates.items():
+         count = 0
+         for task_date in tasks_completed.values():
+             if isinstance(task_date, datetime) and task_date >= start_date:
+                 count += 1
+             elif isinstance(task_date, str):
+                 try:
+                     date_obj = datetime.strptime(task_date, '%d.%m.%Y %H:%M')
+                     if date_obj >= start_date:
+                         count += 1
+                 except ValueError:
+                     continue
+ 
+         if count > 0:
+             username = users.get(user_id, {}).get('username', '—')
+             top_users.append((user_id, count, username))
+ 
+     top_users.sort(key=lambda x: x[1], reverse=True)
+ 
+     if not top_users:
+         return "🏆 Топ заданий пуст за выбранный период."
+ 
+     result = f"🏆 Топ заданий за {'неделю' if period == 'week' else 'месяц'}:\n\n"
+     for i, (user_id, count, username) in enumerate(top_users[:10], 1):
+         result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\n"
+ 
+     return result
+ 
+ # =====================
+ # ЗАПУСК БОТА
+ # =====================
+ 
 async def run_bot():
-    while True:
-        try:
-            print("Запуск бота в режиме polling...")
-            await dp.start_polling(bot, skip_updates=True)
-        except Exception as e:
-            print(f"Ошибка при запуске бота: {e}. Перезапускаем через 5 секунд...")
-            await asyncio.sleep(5)
-
-async def periodic_check_invoices():
-    while True:
-        await check_crypto_bot_invoices()
-        await asyncio.sleep(60) # Проверяем инвойсы каждую минуту
-
+     while True:
+         try:
+             print("Запуск бота в режиме polling...")
+             await dp.start_polling(bot, skip_updates=True)
+         except Exception as e:
+             print(f"Ошибка в работе бота: {e}")
+             print("Перезапуск через 10 секунд...")
+             await asyncio.sleep(10)
+ 
 async def main():
-    await load_data()
-    # Запускаем фоновую задачу для проверки инвойсов
-    asyncio.create_task(periodic_check_invoices())
-    # Запускаем основной процесс бота
-    await run_bot()
-
+     await run_bot()
+ 
 if __name__ == "__main__":
-    asyncio.run(main())
+     # Убедитесь, что все асинхронные операции выполняются правильно
+     asyncio.run(main())
