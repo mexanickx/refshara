@@ -31,9 +31,17 @@ import os
 from aiohttp import web
 
 # ТОКЕНЫ И НАСТРОЙКИ (обязательно настройте эти переменные окружения на Render)
-API_TOKEN = os.environ.get('TELEGRAM_BOT_API_TOKEN', '7740361367:AAGAnKLBl9G_2ooB7UbIpAiOB5YfUzsw9fs') # Используйте переменную окружения
+# TELEGRAM_BOT_API_TOKEN - для вашего основного бота из @BotFather
+API_TOKEN = os.environ.get('TELEGRAM_BOT_API_TOKEN', 'ВАШ_ТОКЕН_БОТА_ИЗ_BOTFATHER_ЗДЕСЬ_КАК_ЗАГЛУШКА') # Замените на реальный, если не используете env vars
+# CRYPTO_BOT_API_TOKEN - для интеграции с Crypto Bot из @CryptoBot
+CRYPTO_BOT_TOKEN = os.environ.get('CRYPTO_BOT_API_TOKEN', 'ВАШ_ТОКЕН_CRYPTOBOT_ЗДЕСЬ_КАК_ЗАГЛУШКА') # Замените на реальный, если не используете env vars
+
+# !!! ВРЕМЕННОЕ ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ !!!
+# Эта строка выведет первые 5 символов токена Crypto Bot в логи Render.
+# После того, как вы убедитесь, что токен читается верно, вы можете удалить эту строку.
+logging.info(f"Using Crypto Bot Token (first 5 chars): {CRYPTO_BOT_TOKEN[:5]}... (length: {len(CRYPTO_BOT_TOKEN)})")
+
 ADMIN_IDS = [1041720539, 6216901034] # Ваши ID администраторов
-CRYPTO_BOT_TOKEN = os.environ.get('CRYPTO_BOT_API_TOKEN', '369438:AAEKsbWPZPQV3YNV4O0GHcWTvSbzkEar43') # Используйте переменную окружения
 CRYPTO_BOT_API_URL = 'https://pay.crypt.bot/api/'
 
 # Константы майнинга
@@ -1261,32 +1269,28 @@ async def get_referral_top(period: str = "week") -> str:
          start_date = now - timedelta(days=30)
 
      top_users = []
-
      for user_id, user_data in users.items():
-         if 'reg_date' not in user_data:
-             continue
-
-         reg_date = datetime.strptime(user_data['reg_date'], '%d.%m.%Y %H:%M')
-         if reg_date < start_date:
-             continue
-
-         referrals = [
-             ref_id for ref_id in user_data.get('referrals', [])
-             if ref_id in users and
-             datetime.strptime(users[ref_id]['reg_date'], '%d.%m.%Y %H:%M') >= start_date
-         ]
-
-         if referrals:
-             top_users.append((user_id, len(referrals), user_data.get('username', '—')))
+         referral_count = 0
+         for ref_id in user_data.get('referrals', []):
+             if ref_id in users and 'reg_date' in users[ref_id]:
+                 try:
+                     ref_reg_date = datetime.strptime(users[ref_id]['reg_date'], '%d.%m.%Y %H:%M')
+                     if ref_reg_date >= start_date:
+                         referral_count += 1
+                 except ValueError:
+                     continue
+         if referral_count > 0:
+             username = user_data.get('username', '—')
+             top_users.append((user_id, referral_count, username))
 
      top_users.sort(key=lambda x: x[1], reverse=True)
 
      if not top_users:
-         return "🏆 Топ рефералов пуст за выбранный период."
+         return "🏆 Топ приглашений пуст за выбранный период."
 
-     result = f"🏆 Топ рефералов за {'неделю' if period == 'week' else 'месяц'}:\n\n"
+     result = f"🏆 Топ приглашений за {'неделю' if period == 'week' else 'месяц'}:\\n\\n"
      for i, (user_id, count, username) in enumerate(top_users[:10], 1):
-         result += f"{i}. @{username} (ID: {user_id}) - {count} реф.\n"
+         result += f"{i}. @{username} (ID: {user_id}) - {count} рефералов\\n"
 
      return result
 
@@ -1299,12 +1303,13 @@ async def get_tasks_top(period: str = "week") -> str:
          start_date = now - timedelta(days=30)
 
      top_users = []
-
-     for user_id, tasks_completed in task_completion_dates.items():
+     for user_id, user_tasks in task_completion_dates.items():
          count = 0
-         for task_date in tasks_completed.values():
-             if isinstance(task_date, datetime) and task_date >= start_date:
-                 count += 1
+         for task_num, task_date in user_tasks.items():
+             # task_date может быть datetime object или строкой
+             if isinstance(task_date, datetime):
+                 if task_date >= start_date:
+                     count += 1
              elif isinstance(task_date, str):
                  try:
                      date_obj = datetime.strptime(task_date, '%d.%m.%Y %H:%M')
@@ -1322,60 +1327,53 @@ async def get_tasks_top(period: str = "week") -> str:
      if not top_users:
          return "🏆 Топ заданий пуст за выбранный период."
 
-     result = f"🏆 Топ заданий за {'неделю' if period == 'week' else 'месяц'}:\n\n"
+     result = f"🏆 Топ заданий за {'неделю' if period == 'week' else 'месяц'}:\\n\\n"
      for i, (user_id, count, username) in enumerate(top_users[:10], 1):
-         result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\n"
+         result += f"{i}. @{username} (ID: {user_id}) - {count} заданий\\n"
 
      return result
 
 # =====================
-# ЗАПУСК БОТА И ФЕЙКОВОГО СЕРВЕРА
+# ЗАПУСК БОТА И ВЕБ-СЕРВЕРА
 # =====================
 
 async def run_bot():
      while True:
          try:
-             print("Запуск бота в режиме polling...")
+             logging.info("Запуск бота в режиме polling...")
              await dp.start_polling(bot, skip_updates=True)
          except TelegramForbiddenError as e:
-             # Логируем ошибку, если бот заблокирован пользователем
-             print(f"Ошибка: Бот был заблокирован пользователем. {e}")
-             # Можно добавить логику для удаления пользователя из списка активных, если это необходимо
-             await asyncio.sleep(5) # Ждем немного перед следующей попыткой или просто продолжаем
+             logging.error(f"Бот заблокирован пользователем или ошибка токена: {e}")
+             # В продакшене можно добавить логику для удаления пользователя из рассылки и т.д.
+             await asyncio.sleep(60) # Подождать перед повторной попыткой
          except Exception as e:
-             print(f"Ошибка в работе бота: {e}")
-             print("Перезапуск через 10 секунд...")
-             await asyncio.sleep(10)
+             logging.error(f"Произошла ошибка при запуске бота: {e}")
+             await asyncio.sleep(5) # Ждем перед перезапуском
 
-# Fake server for Render deployment as Web Service
-async def fake_server_handler(request):
-    return web.Response(text="Bot is running!")
-
-async def start_fake_server():
-    # Render предоставляет порт через переменную окружения PORT
-    port = int(os.environ.get("PORT", 10000)) 
-    app = web.Application()
-    app.router.add_get('/', fake_server_handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    # Привязываем к '0.0.0.0' для доступности извне контейнера
-    site = web.TCPSite(runner, '0.0.0.0', port) 
-    await site.start()
-    print(f"Fake web server running on port {port}")
-    # Держим сервер запущенным бесконечно
-    while True:
-        await asyncio.sleep(3600) # Спим час, чтобы не потреблять CPU циклы постоянно
+async def fake_server(request):
+    """
+    Простой HTTP сервер, чтобы Render видел открытый порт.
+    """
+    return web.Response(text="Bot is running and listening for Telegram updates!")
 
 async def main():
-    # Запускаем бота и фейковый сервер параллельно
-    await asyncio.gather(
-        run_bot(),
-        start_fake_server()
-    )
+    # Запускаем фейковый веб-сервер
+    port = int(os.environ.get("PORT", 8080)) # Render предоставляет порт через переменную окружения PORT
+    app = web.Application()
+    app.router.add_get("/", fake_server)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    logging.info(f"Запускаем фейковый веб-сервер на порту {port}")
+    await site.start()
 
-if __name__ == "__main__":
-    # Установите переменные окружения, если запускаете локально
-    # os.environ['TELEGRAM_BOT_API_TOKEN'] = 'ВАШ_ТОКЕН_БОТА'
-    # os.environ['CRYPTO_BOT_API_TOKEN'] = 'ВАШ_ТОКЕН_КРИПТО_БОТА'
-    
-    asyncio.run(main())
+    # Запускаем бота
+    await run_bot() # run_bot уже содержит бесконечный цикл и обработку ошибок
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Бот остановлен вручную.")
+    except Exception as e:
+        logging.critical(f"Критическая ошибка в главном процессе: {e}")
